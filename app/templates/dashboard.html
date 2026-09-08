@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Controller Portfolio — {{ app_name }}{% endblock %}
+
+{% block content %}
+<!-- Portfolio Header -->
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h4 class="mb-0 fw-bold">CLIENT PORTFOLIO</h4>
+    <p class="text-muted mb-0 small">AI Controller · {{ total_companies }} companies · {{ connected }} connected</p>
+  </div>
+  <a href="/qbo/connect" class="btn btn-primary">
+    <i class="bi bi-plus-lg me-1"></i> Connect New QBO Company
+  </a>
+</div>
+
+{% if not portfolio %}
+<!-- Empty state -->
+<div class="card border-0 shadow-sm text-center py-5">
+  <div class="card-body">
+    <i class="bi bi-building" style="font-size:48px;color:#d1d5db;"></i>
+    <h5 class="mt-3 text-muted">No Companies Connected</h5>
+    <p class="text-muted">Connect a QuickBooks Online company to create an isolated accounting workspace.</p>
+    <a href="/qbo/connect" class="btn btn-primary mt-2">
+      <i class="bi bi-plus-lg me-1"></i> Connect Your First QBO Company
+    </a>
+  </div>
+</div>
+{% else %}
+<!-- Portfolio Summary KPIs -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value text-primary">{{ total_companies }}</div>
+      <div class="kpi-label"><i class="bi bi-building me-1"></i> Company Workspaces</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value text-success">{{ connected }}</div>
+      <div class="kpi-label"><i class="bi bi-link-45deg me-1"></i> QBO Connected</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="kpi-card">
+      {% set total_critical = portfolio | sum(attribute='critical_issues') %}
+      <div class="kpi-value {% if total_critical > 0 %}text-danger{% else %}text-success{% endif %}">{{ total_critical }}</div>
+      <div class="kpi-label"><i class="bi bi-exclamation-circle me-1"></i> Critical Issues (all)</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="kpi-card">
+      {% set avg_score = (portfolio | sum(attribute='health_score') / portfolio | length) | round(0) if portfolio else 0 %}
+      <div class="kpi-value {% if avg_score >= 80 %}text-success{% elif avg_score >= 70 %}text-warning{% else %}text-danger{% endif %}">{{ avg_score }}</div>
+      <div class="kpi-label"><i class="bi bi-heart-pulse me-1"></i> Avg Health Score</div>
+    </div>
+  </div>
+</div>
+
+<!-- Company Grid -->
+<div class="row g-3 mb-4">
+  {% for co in portfolio %}
+  <div class="col-md-6 col-xl-4">
+    <div class="card border-0 shadow-sm h-100" style="border-radius:12px;">
+      <div class="card-body p-4">
+        <!-- Company Header -->
+        <div class="d-flex justify-content-between align-items-start mb-3">
+          <div class="flex-grow-1">
+            <h6 class="fw-bold mb-1">{{ co.company_name }}</h6>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="realm-badge" style="font-size:10px;">{{ co.realm_id }}</span>
+              <span class="badge {% if co.connection_status == 'connected' %}bg-success{% else %}bg-secondary{% endif %}" style="font-size:10px;">
+                {{ co.connection_status | upper }}
+              </span>
+              {% if co.environment == 'sandbox' %}
+              <span class="badge bg-warning text-dark" style="font-size:10px;">SANDBOX</span>
+              {% endif %}
+            </div>
+          </div>
+          <a href="/company/{{ co.realm_id }}" class="btn btn-sm btn-outline-primary ms-2">Open</a>
+        </div>
+
+        <!-- Health Score -->
+        <div class="d-flex align-items-center gap-3 mb-3 p-3 rounded-3" style="background:#f8fafc;">
+          <div style="position:relative;width:60px;height:60px;flex-shrink:0;">
+            <canvas id="gauge-{{ loop.index }}" width="60" height="60"></canvas>
+            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">
+              <div style="font-size:16px;font-weight:800;line-height:1;color:{{
+                '#16a34a' if co.health_color == 'success' else
+                '#2563eb' if co.health_color == 'primary' else
+                '#d97706' if co.health_color == 'warning' else
+                '#ea580c' if co.health_color == 'orange' else '#dc2626'
+              }};">{{ co.health_score | int }}</div>
+            </div>
+          </div>
+          <div>
+            <div class="fw-semibold" style="font-size:13px;">{{ co.health_label }}</div>
+            <div class="text-muted" style="font-size:11px;">Accounting Health</div>
+          </div>
+        </div>
+
+        <!-- Issue Counts -->
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <div class="p-2 rounded-2 {% if co.critical_issues > 0 %}bg-danger bg-opacity-10{% else %}bg-light{% endif %}">
+              <div class="fw-bold {% if co.critical_issues > 0 %}text-danger{% else %}text-muted{% endif %}" style="font-size:18px;">{{ co.critical_issues }}</div>
+              <div class="text-muted" style="font-size:11px;">🔴 Critical</div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="p-2 rounded-2 {% if co.high_issues > 0 %}bg-warning bg-opacity-10{% else %}bg-light{% endif %}">
+              <div class="fw-bold {% if co.high_issues > 0 %}text-warning{% else %}text-muted{% endif %}" style="font-size:18px;">{{ co.high_issues }}</div>
+              <div class="text-muted" style="font-size:11px;">🟠 High</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sync & Close Status -->
+        <div class="small text-muted">
+          <div><i class="bi bi-arrow-repeat me-1"></i> Synced: {{ co.last_sync }}</div>
+          <div class="mt-1"><i class="bi bi-calendar-check me-1"></i> Month-End:
+            <span class="badge bg-{% if co.month_end_status == 'closed' %}success{% elif co.month_end_status == 'in_progress' %}warning{% else %}secondary{% endif %} ms-1" style="font-size:10px;">
+              {{ co.month_end_status | upper }}
+            </span>
+            {% if co.month_end_period %}<span class="ms-1">{{ co.month_end_period }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Company Table -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white border-bottom py-3">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-table me-2"></i>COMPANY WORKSPACES — FULL VIEW</h6>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Company</th>
+          <th>QBO Realm ID</th>
+          <th>QBO Status</th>
+          <th>Last Sync</th>
+          <th class="text-center">Health Score</th>
+          <th class="text-center">Open Issues</th>
+          <th class="text-center">Critical</th>
+          <th>Month-End</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for co in portfolio %}
+        <tr>
+          <td class="fw-semibold">{{ co.company_name }}</td>
+          <td><code class="small">{{ co.realm_id }}</code></td>
+          <td>
+            <span class="status-dot status-{{ co.connection_status }} me-1"></span>
+            {{ co.connection_status | title }}
+          </td>
+          <td class="small text-muted">{{ co.last_sync }}</td>
+          <td class="text-center">
+            <span class="badge bg-{{ co.health_color }}" style="font-size:12px;">{{ co.health_score | int }}</span>
+            <div class="small text-muted" style="font-size:10px;">{{ co.health_label }}</div>
+          </td>
+          <td class="text-center fw-semibold">{{ co.open_issues }}</td>
+          <td class="text-center {% if co.critical_issues > 0 %}text-danger fw-bold{% else %}text-muted{% endif %}">{{ co.critical_issues }}</td>
+          <td>
+            <span class="badge bg-{% if co.month_end_status == 'closed' %}success{% elif co.month_end_status == 'in_progress' %}warning{% else %}secondary{% endif %}">
+              {{ co.month_end_status | title }}
+            </span>
+          </td>
+          <td>
+            <a href="/company/{{ co.realm_id }}" class="btn btn-sm btn-outline-primary">Open Workspace</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Mini donut gauges
+{% for co in portfolio %}
+(function() {
+  const canvas = document.getElementById('gauge-{{ loop.index }}');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const score = {{ co.health_score | int }};
+  const color = '{{ "#16a34a" if co.health_color == "success" else "#2563eb" if co.health_color == "primary" else "#d97706" if co.health_color == "warning" else "#ea580c" if co.health_color == "orange" else "#dc2626" }}';
+  const angle = (score / 100) * 2 * Math.PI;
+  const cx = 30, cy = 30, r = 24;
+  ctx.clearRect(0, 0, 60, 60);
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI);
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 6; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + angle);
+  ctx.strokeStyle = color; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke();
+})();
+{% endfor %}
+</script>
+{% endblock %}

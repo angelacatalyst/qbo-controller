@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block title %}Journal Entries — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">JOURNAL ENTRY APPROVAL WORKFLOW</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · READ-ONLY default · Write requires approval</p>
+  </div>
+  <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#proposeJEModal">
+    <i class="bi bi-plus-lg me-1"></i>Propose Journal Entry
+  </button>
+</div>
+
+<!-- Workflow Indicator -->
+<div class="card border-0 mb-4" style="background:#f0f9ff;border:1px solid #bae6fd!important;">
+  <div class="card-body py-3">
+    <div class="d-flex align-items-center gap-1 flex-wrap small">
+      <span class="badge bg-secondary">READ-ONLY</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-info">DETECT</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-primary">ANALYZE</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-warning text-dark">RECOMMEND</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-warning text-dark">REVIEW</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-success">✓ APPROVE</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-success">EXECUTE → QBO</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-success">VERIFY</span>
+      <i class="bi bi-arrow-right text-muted"></i>
+      <span class="badge bg-dark">DOCUMENT</span>
+    </div>
+    <div class="small text-muted mt-2">Journal entries are never automatically posted. Each entry requires explicit approval before execution in QBO.</div>
+  </div>
+</div>
+
+<!-- Filter tabs -->
+<div class="d-flex gap-2 mb-3">
+  <a href="?" class="btn btn-sm {% if not status_filter %}btn-primary{% else %}btn-outline-secondary{% endif %}">All</a>
+  <a href="?status_filter=pending" class="btn btn-sm {% if status_filter=='pending' %}btn-warning{% else %}btn-outline-secondary{% endif %}">Pending Approval</a>
+  <a href="?status_filter=approved" class="btn btn-sm {% if status_filter=='approved' %}btn-success{% else %}btn-outline-secondary{% endif %}">Approved</a>
+  <a href="?status_filter=executed" class="btn btn-sm {% if status_filter=='executed' %}btn-info{% else %}btn-outline-secondary{% endif %}">Executed</a>
+  <a href="?status_filter=verified" class="btn btn-sm {% if status_filter=='verified' %}btn-dark{% else %}btn-outline-secondary{% endif %}">Verified</a>
+  <a href="?status_filter=rejected" class="btn btn-sm {% if status_filter=='rejected' %}btn-danger{% else %}btn-outline-secondary{% endif %}">Rejected</a>
+</div>
+
+{% if not journal_entries %}
+<div class="card border-0 shadow-sm text-center py-5">
+  <div class="card-body">
+    <i class="bi bi-journal-text" style="font-size:40px;color:#d1d5db;"></i>
+    <h6 class="mt-3 text-muted">No Journal Entries</h6>
+    <p class="text-muted small">Propose a journal entry to start the approval workflow.</p>
+  </div>
+</div>
+{% else %}
+{% for je in journal_entries %}
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+    <div class="d-flex align-items-center gap-3">
+      <span class="fw-bold">{{ je.je_number }}</span>
+      <span class="badge {% if je.approval_status == 'verified' %}bg-dark{% elif je.approval_status in ('executed',) %}bg-info{% elif je.approval_status == 'approved' %}bg-success{% elif je.approval_status == 'rejected' %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+        {{ je.approval_status | upper }}
+      </span>
+      <span class="text-muted small">{{ je.je_date | fmt_date }}</span>
+      {% if je.materiality %}
+      <span class="badge bg-light text-dark border">{{ je.materiality | title }} materiality</span>
+      {% endif %}
+    </div>
+    <div class="d-flex gap-2">
+      {% if je.approval_status == 'pending' %}
+      <button class="btn btn-sm btn-success" onclick="approveJE('{{ je.id }}', '{{ je.je_number }}')">
+        <i class="bi bi-check-circle me-1"></i>Approve
+      </button>
+      <button class="btn btn-sm btn-outline-danger" onclick="rejectJE('{{ je.id }}', '{{ je.je_number }}')">
+        <i class="bi bi-x-circle me-1"></i>Reject
+      </button>
+      {% elif je.approval_status == 'approved' %}
+      <button class="btn btn-sm btn-primary" onclick="executeJE('{{ je.id }}', '{{ je.je_number }}')">
+        <i class="bi bi-send me-1"></i>Post to QBO
+      </button>
+      {% endif %}
+      {% if je.qbo_transaction_id %}
+      <span class="badge bg-success"><i class="bi bi-check-all me-1"></i>QBO: {{ je.qbo_transaction_id }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-8">
+        <div class="fw-semibold mb-1">{{ je.description }}</div>
+        {% if je.reason %}
+        <div class="text-muted small mb-2">
+          <strong>Reason:</strong> {{ je.reason }}
+        </div>
+        {% endif %}
+
+        <!-- JE Lines -->
+        {% if je.lines %}
+        <table class="table table-sm border-0 mt-2">
+          <thead class="table-light">
+            <tr>
+              <th class="small">Account</th>
+              <th class="small text-end">Debit</th>
+              <th class="small text-end">Credit</th>
+              <th class="small">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for line in je.lines %}
+            <tr>
+              <td class="small">{{ line.account_name or line.account_id }}</td>
+              <td class="small text-end">{% if line.debit %}{{ line.debit | currency }}{% endif %}</td>
+              <td class="small text-end">{% if line.credit %}{{ line.credit | currency }}{% endif %}</td>
+              <td class="small text-muted">{{ line.description or '' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-muted small fst-italic">No line items defined yet</div>
+        {% endif %}
+      </div>
+
+      <div class="col-md-4">
+        <div class="p-3 rounded-3" style="background:#f8fafc;">
+          {% if je.approved_by %}
+          <div class="mb-2">
+            <div class="text-muted" style="font-size:10px;">APPROVED BY</div>
+            <div class="small fw-semibold">{{ je.approved_by }}</div>
+            <div class="text-muted" style="font-size:10px;">{{ je.approved_at | fmt_date }}</div>
+          </div>
+          {% endif %}
+          {% if je.qbo_transaction_id %}
+          <div class="mb-2">
+            <div class="text-muted" style="font-size:10px;">QBO TRANSACTION</div>
+            <div class="small fw-semibold text-success">{{ je.qbo_transaction_id }}</div>
+            <div class="text-muted" style="font-size:10px;">{{ je.executed_at | fmt_date }}</div>
+          </div>
+          {% endif %}
+          {% if je.verification_status %}
+          <div class="mb-2">
+            <div class="text-muted" style="font-size:10px;">VERIFICATION</div>
+            <span class="badge {% if je.verification_status == 'verified' %}bg-success{% else %}bg-secondary{% endif %}">
+              {{ je.verification_status | title }}
+            </span>
+          </div>
+          {% endif %}
+          {% if je.rejection_reason %}
+          <div class="mb-2">
+            <div class="text-muted" style="font-size:10px;">REJECTION REASON</div>
+            <div class="small text-danger">{{ je.rejection_reason }}</div>
+          </div>
+          {% endif %}
+          <div class="text-muted" style="font-size:10px;">CREATED {{ je.created_at | fmt_date }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<!-- Propose JE Modal -->
+<div class="modal fade" id="proposeJEModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold">Propose Journal Entry</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="/company/{{ company.realm_id }}/journal-entries/propose">
+        <div class="modal-body">
+          <div class="alert alert-info small">
+            <i class="bi bi-info-circle me-1"></i>
+            This proposal will require <strong>approval</strong> before it can be posted to QBO.
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Journal Entry Date</label>
+            <input type="date" name="je_date" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Description / Memo</label>
+            <input type="text" name="description" class="form-control" placeholder="Brief description of the entry" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Reason & Supporting Evidence</label>
+            <textarea name="reason" class="form-control" rows="3"
+                      placeholder="Explain why this adjustment is needed and cite supporting evidence..." required></textarea>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Materiality</label>
+            <select name="materiality" class="form-select">
+              <option value="immaterial">Immaterial</option>
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+              <option value="material">Material</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Submit for Approval</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const realmId = '{{ company.realm_id }}';
+
+function approveJE(id, number) {
+  const approver = prompt(`Approve ${number}?\n\nEnter approver name:`, 'Controller');
+  if (!approver) return;
+  fetch(`/api/company/${realmId}/journal-entries/${id}/approve`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'approved_by=' + encodeURIComponent(approver)
+  }).then(r => r.json()).then(d => {
+    if (d.success) { alert(`✅ ${number} approved by ${approver}`); location.reload(); }
+  });
+}
+
+function rejectJE(id, number) {
+  const reason = prompt(`Reject ${number}?\n\nReason for rejection:`);
+  if (!reason) return;
+  fetch(`/api/company/${realmId}/journal-entries/${id}/reject`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'reason=' + encodeURIComponent(reason)
+  }).then(r => r.json()).then(d => {
+    if (d.success) { alert(`❌ ${number} rejected`); location.reload(); }
+  });
+}
+
+function executeJE(id, number) {
+  if (!confirm(`Post ${number} to QuickBooks Online?\n\nThis action will CREATE a journal entry in QBO and cannot be easily undone.\n\nConfirm execution?`)) return;
+  fetch(`/api/company/${realmId}/journal-entries/${id}/execute`, {
+    method: 'POST',
+  }).then(r => r.json()).then(d => {
+    if (d.success) { alert(`✅ ${number} posted to QBO!\nQBO Transaction ID: ${d.qbo_id}`); location.reload(); }
+    else { alert('Error: ' + JSON.stringify(d)); }
+  }).catch(e => alert('Execution error: ' + e));
+}
+</script>
+{% endblock %}

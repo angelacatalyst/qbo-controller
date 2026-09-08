@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Issues — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">ACCOUNTING ISSUES</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · Realm: {{ company.realm_id }}</p>
+  </div>
+  <form method="post" action="/company/{{ company.realm_id }}/assess">
+    <button class="btn btn-primary"><i class="bi bi-arrow-repeat me-1"></i>Re-run Assessment</button>
+  </form>
+</div>
+
+<!-- Filters -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body py-3">
+    <form class="row g-2 align-items-end" method="get">
+      <div class="col-auto">
+        <label class="form-label small mb-1">Severity</label>
+        <select name="severity" class="form-select form-select-sm" onchange="this.form.submit()">
+          <option value="">All Severities</option>
+          <option value="critical" {% if filter_severity=='critical' %}selected{% endif %}>🔴 Critical</option>
+          <option value="high" {% if filter_severity=='high' %}selected{% endif %}>🟠 High</option>
+          <option value="medium" {% if filter_severity=='medium' %}selected{% endif %}>🟡 Medium</option>
+          <option value="low" {% if filter_severity=='low' %}selected{% endif %}>🟢 Low</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Category</label>
+        <select name="category" class="form-select form-select-sm" onchange="this.form.submit()">
+          <option value="">All Categories</option>
+          <option value="bank_rec" {% if filter_category=='bank_rec' %}selected{% endif %}>Bank Reconciliation</option>
+          <option value="credit_card" {% if filter_category=='credit_card' %}selected{% endif %}>Credit Card</option>
+          <option value="ar" {% if filter_category=='ar' %}selected{% endif %}>Accounts Receivable</option>
+          <option value="ap" {% if filter_category=='ap' %}selected{% endif %}>Accounts Payable</option>
+          <option value="payroll" {% if filter_category=='payroll' %}selected{% endif %}>Payroll</option>
+          <option value="sales_tax" {% if filter_category=='sales_tax' %}selected{% endif %}>Sales Tax</option>
+          <option value="equity" {% if filter_category=='equity' %}selected{% endif %}>Equity</option>
+          <option value="uncategorized" {% if filter_category=='uncategorized' %}selected{% endif %}>Uncategorized</option>
+          <option value="balance_sheet" {% if filter_category=='balance_sheet' %}selected{% endif %}>Balance Sheet</option>
+          <option value="loan" {% if filter_category=='loan' %}selected{% endif %}>Loan</option>
+          <option value="fixed_asset" {% if filter_category=='fixed_asset' %}selected{% endif %}>Fixed Assets</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Status</label>
+        <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+          <option value="open" {% if filter_status=='open' %}selected{% endif %}>Open</option>
+          <option value="resolved" {% if filter_status=='resolved' %}selected{% endif %}>Resolved</option>
+          <option value="" {% if not filter_status %}selected{% endif %}>All</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <a href="?" class="btn btn-sm btn-outline-secondary">Clear Filters</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Issues List -->
+{% if not issues %}
+<div class="card border-0 shadow-sm text-center py-5">
+  <div class="card-body">
+    <i class="bi bi-check-circle-fill text-success" style="font-size:40px;"></i>
+    <h6 class="mt-3">No Issues Found</h6>
+    <p class="text-muted small">{% if filter_severity or filter_category %}No issues match the current filters.{% else %}Run an assessment to check for accounting issues.{% endif %}</p>
+  </div>
+</div>
+{% else %}
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white py-3 border-bottom">
+    <span class="fw-semibold">{{ issues | length }} Issue(s)</span>
+    <span class="text-muted small ms-2">Total financial impact:
+      <strong class="text-danger">${{ "{:,.2f}".format(issues | selectattr('financial_impact') | map(attribute='financial_impact') | sum) }}</strong>
+    </span>
+  </div>
+
+  {% for issue in issues %}
+  <div class="p-4 border-bottom alert-issue {{ issue.severity }}" id="issue-{{ issue.issue_id }}">
+    <div class="row g-3">
+      <div class="col-md-8">
+        <!-- Header -->
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <code class="text-muted" style="font-size:11px;">{{ issue.issue_id }}</code>
+          <span class="badge sev-badge-{{ issue.severity }}">
+            {% if issue.severity == 'critical' %}🔴 CRITICAL{% elif issue.severity == 'high' %}🟠 HIGH{% elif issue.severity == 'medium' %}🟡 MEDIUM{% else %}🟢 LOW{% endif %}
+          </span>
+          <span class="badge bg-light text-dark border">{{ issue.category | replace('_', ' ') | title }}</span>
+          {% if issue.approval_required %}
+          <span class="badge bg-warning text-dark"><i class="bi bi-shield-lock me-1"></i>Approval Required</span>
+          {% endif %}
+        </div>
+
+        <h6 class="fw-bold mb-2">{{ issue.title }}</h6>
+        <p class="mb-2 small text-muted">{{ issue.description }}</p>
+
+        {% if issue.recommended_action %}
+        <div class="mt-2 p-2 rounded-2" style="background:#f0fdf4;border:1px solid #bbf7d0;">
+          <div class="small fw-semibold text-success mb-1"><i class="bi bi-arrow-right-circle me-1"></i>RECOMMENDED ACTION</div>
+          <div class="small">{{ issue.recommended_action }}</div>
+        </div>
+        {% endif %}
+
+        {% if issue.likely_cause %}
+        <div class="small text-muted mt-2">
+          <strong>Likely Cause:</strong> {{ issue.likely_cause }}
+        </div>
+        {% endif %}
+
+        {% if issue.documentation_required %}
+        <div class="small text-muted mt-1">
+          <i class="bi bi-file-text me-1"></i><strong>Documentation Needed:</strong> {{ issue.documentation_required }}
+        </div>
+        {% endif %}
+      </div>
+
+      <div class="col-md-4">
+        <div class="rounded-3 p-3" style="background:#f8fafc;">
+          {% if issue.account_name %}
+          <div class="mb-2"><div class="text-muted" style="font-size:10px;">ACCOUNT</div><div class="fw-semibold small">{{ issue.account_name }}</div></div>
+          {% endif %}
+          {% if issue.amount %}
+          <div class="mb-2"><div class="text-muted" style="font-size:10px;">AMOUNT</div><div class="fw-bold">{{ issue.amount | currency }}</div></div>
+          {% endif %}
+          {% if issue.financial_impact %}
+          <div class="mb-2"><div class="text-muted" style="font-size:10px;">FINANCIAL IMPACT</div><div class="fw-bold text-danger">{{ issue.financial_impact | currency }}</div></div>
+          {% endif %}
+          {% if issue.risk %}
+          <div class="mb-2"><div class="text-muted" style="font-size:10px;">RISK</div><div class="small text-warning">{{ issue.risk }}</div></div>
+          {% endif %}
+          <div class="mb-3"><div class="text-muted" style="font-size:10px;">STATUS</div>
+            <span class="badge bg-{% if issue.status == 'resolved' %}success{% elif issue.status == 'in_progress' %}warning{% else %}secondary{% endif %}">
+              {{ issue.status | title }}
+            </span>
+          </div>
+
+          {% if issue.status == 'open' %}
+          <button class="btn btn-sm btn-outline-success w-100"
+                  onclick="resolveIssue('{{ issue.issue_id }}')">
+            <i class="bi bi-check-circle me-1"></i>Mark Resolved
+          </button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function resolveIssue(issueId) {
+  const notes = prompt("Resolution notes (optional):");
+  if (notes === null) return;
+  fetch(`/company/{{ company.realm_id }}/issues/${issueId}/resolve`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'notes=' + encodeURIComponent(notes)
+  }).then(r => r.json()).then(d => {
+    if (d.success) { document.getElementById('issue-' + issueId)?.remove(); }
+  });
+}
+</script>
+{% endblock %}

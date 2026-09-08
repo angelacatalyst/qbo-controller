@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Month-End Close — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">MONTH-END CLOSE CHECKLIST</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · 24-Step Controller Close Process</p>
+  </div>
+  <div class="d-flex gap-2">
+    <form class="d-flex gap-2">
+      <input type="month" name="period" value="{{ period }}" class="form-control form-control-sm" onchange="this.form.submit()">
+    </form>
+    <span class="badge {% if close.status == 'closed' %}bg-success{% elif close.status == 'in_progress' %}bg-warning text-dark{% else %}bg-secondary{% endif %} align-self-center" style="font-size:13px;">
+      {{ close.status | upper }}
+    </span>
+  </div>
+</div>
+
+<!-- Progress -->
+{% set total_steps = close.checklist | length %}
+{% set completed_steps = close.checklist | selectattr('status', 'equalto', 'complete') | list | length %}
+{% set pct = ((completed_steps / total_steps) * 100) | int %}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <span class="fw-semibold">Progress: {{ completed_steps }} / {{ total_steps }} steps</span>
+      <span class="fw-bold {% if pct == 100 %}text-success{% elif pct >= 50 %}text-warning{% else %}text-muted{% endif %}">{{ pct }}%</span>
+    </div>
+    <div class="progress" style="height:12px;border-radius:6px;">
+      <div class="progress-bar {% if pct == 100 %}bg-success{% elif pct >= 50 %}bg-warning{% else %}bg-primary{% endif %}"
+           style="width:{{ pct }}%;transition:width .8s;"></div>
+    </div>
+    <div class="row mt-3 text-center">
+      <div class="col"><div class="fw-bold text-muted">{{ period }}</div><div class="text-muted small">Accounting Period</div></div>
+      <div class="col"><div class="fw-bold">{{ close.started_at | fmt_date if close.started_at else '—' }}</div><div class="text-muted small">Started</div></div>
+      <div class="col"><div class="fw-bold {% if close.status == 'closed' %}text-success{% else %}text-muted{% endif %}">{{ close.completed_at | fmt_date if close.completed_at else 'In Progress' }}</div><div class="text-muted small">Completed</div></div>
+      <div class="col"><div class="fw-bold {{ 'text-success' if close.status == 'closed' else 'text-warning' }}">{{ close.status | title }}</div><div class="text-muted small">Status</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Checklist -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white py-3 border-bottom">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-list-check me-2"></i>CONTROLLER CLOSE CHECKLIST — {{ period }}</h6>
+  </div>
+  <div class="card-body p-0">
+    {% for step in close.checklist %}
+    <div class="step-row px-4" id="step-{{ step.step_num }}">
+      <div class="step-num {{ step.status }}">
+        {% if step.status == 'complete' %}<i class="bi bi-check-lg text-success"></i>{% elif step.status == 'in_progress' %}<i class="bi bi-arrow-right text-primary"></i>{% else %}{{ step.step_num }}{% endif %}
+      </div>
+      <div class="flex-grow-1">
+        <div class="fw-semibold small">{{ step.title }}</div>
+        {% if step.notes %}
+        <div class="text-muted" style="font-size:11px;">{{ step.notes }}</div>
+        {% endif %}
+        {% if step.completed_at %}
+        <div class="text-muted" style="font-size:10px;">Completed {{ step.completed_at[:10] }} by {{ step.completed_by }}</div>
+        {% endif %}
+      </div>
+      <div class="ms-auto d-flex gap-2 align-items-center">
+        {% if step.status == 'complete' %}
+        <span class="badge bg-success" style="font-size:10px;"><i class="bi bi-check me-1"></i>Complete</span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="updateStep({{ step.step_num }}, 'pending', '')">Undo</button>
+        {% elif step.status == 'in_progress' %}
+        <button class="btn btn-sm btn-success" onclick="updateStep({{ step.step_num }}, 'complete', '')">✓ Complete</button>
+        {% else %}
+        <button class="btn btn-sm btn-outline-primary" onclick="updateStep({{ step.step_num }}, 'in_progress', '')">Start</button>
+        <button class="btn btn-sm btn-success" onclick="updateStep({{ step.step_num }}, 'complete', '')">✓ Done</button>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if close.status == 'closed' %}
+  <div class="card-footer bg-success text-white text-center py-3">
+    <i class="bi bi-check-circle-fill me-2" style="font-size:20px;"></i>
+    <strong>Month Closed!</strong> All 24 steps completed. {{ close.completed_at | fmt_date }}
+  </div>
+  {% endif %}
+</div>
+
+<!-- History -->
+{% if all_closes | length > 1 %}
+<div class="card border-0 shadow-sm mt-4">
+  <div class="card-header bg-white py-3 border-bottom">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-clock-history me-2"></i>CLOSE HISTORY</h6>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead class="table-light"><tr><th>Period</th><th>Status</th><th>Started</th><th>Completed</th><th></th></tr></thead>
+      <tbody>
+        {% for c in all_closes %}
+        <tr>
+          <td class="fw-semibold">{{ c.period }}</td>
+          <td><span class="badge {% if c.status == 'closed' %}bg-success{% elif c.status == 'in_progress' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">{{ c.status | title }}</span></td>
+          <td class="small text-muted">{{ c.started_at | fmt_date }}</td>
+          <td class="small text-muted">{{ c.completed_at | fmt_date }}</td>
+          <td><a href="?period={{ c.period }}" class="btn btn-sm btn-outline-secondary">View</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const closeId = '{{ close.id }}';
+const realmId = '{{ company.realm_id }}';
+
+function updateStep(stepNum, status, notes) {
+  fetch(`/api/company/${realmId}/month-close/${closeId}/step`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: `step_num=${stepNum}&step_status=${status}&notes=${encodeURIComponent(notes)}`
+  }).then(r => r.json()).then(d => {
+    if (d.success) { location.reload(); }
+  });
+}
+</script>
+{% endblock %}

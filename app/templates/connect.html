@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Connect QBO Company — {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-7 col-lg-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-4 border-bottom text-center">
+        <i class="bi bi-plus-circle-fill text-primary" style="font-size:32px;"></i>
+        <h5 class="mt-2 mb-0 fw-bold">Connect New QBO Company</h5>
+        <p class="text-muted small mt-1 mb-0">A new isolated workspace will be created for this company.</p>
+      </div>
+      <div class="card-body p-4">
+
+        {% if not has_credentials %}
+        <div class="alert alert-warning mb-4">
+          <h6 class="fw-bold"><i class="bi bi-exclamation-triangle-fill me-2"></i>QBO Credentials Required</h6>
+          <p class="mb-2 small">You need a QuickBooks Online Developer App to connect. Follow these steps:</p>
+          <ol class="small mb-0">
+            <li>Go to <a href="https://developer.intuit.com" target="_blank">developer.intuit.com</a></li>
+            <li>Sign in with your Intuit account</li>
+            <li>Create a new app (choose QuickBooks Online)</li>
+            <li>Under <strong>Keys & Credentials</strong>, copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+            <li>Under <strong>Redirect URIs</strong>, add: <code>http://localhost:8000/qbo/callback</code></li>
+            <li>Add these to your <code>.env</code> file and restart the server</li>
+          </ol>
+        </div>
+        {% endif %}
+
+        <!-- QBO Environment indicator -->
+        <div class="alert alert-info mb-4 py-2">
+          <small>
+            <i class="bi bi-info-circle me-1"></i>
+            <strong>Current Environment:</strong> {{ environment | upper }}
+            {% if environment == 'sandbox' %}
+            — Connecting to QBO Sandbox. For production companies, change <code>QBO_ENVIRONMENT=production</code> in your <code>.env</code> file.
+            {% else %}
+            — Connecting to Production QBO. Real company data.
+            {% endif %}
+          </small>
+        </div>
+
+        <form method="post" action="/qbo/connect">
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Company Display Name</label>
+            <input type="text" name="company_name" class="form-control form-control-lg"
+                   placeholder="e.g. Affordable Metal Inc." required>
+            <div class="form-text">This is just the display name. The actual company name will be pulled from QBO after authorization.</div>
+          </div>
+
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary btn-lg" {% if not has_credentials %}disabled{% endif %}>
+              <i class="bi bi-box-arrow-up-right me-2"></i>
+              Authorize with QuickBooks Online
+            </button>
+          </div>
+
+          {% if not has_credentials %}
+          <div class="text-center mt-2 small text-muted">Add QBO credentials to .env to enable</div>
+          {% endif %}
+        </form>
+
+        <hr class="my-4">
+
+        <!-- How it works -->
+        <div class="small text-muted">
+          <div class="fw-semibold mb-2 text-dark">How This Works</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">1</span> You enter the company name and click Authorize</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">2</span> Intuit's secure login page opens — you sign in with the QBO company's credentials</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">3</span> You grant permission — QBO redirects back with a secure authorization code</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">4</span> An isolated workspace is created with the company's Realm ID as the unique identifier</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">5</span> Run a Sync to load accounting data, then run an Assessment</div>
+          <div class="mt-3 text-muted" style="font-size:11px;">
+            <i class="bi bi-shield-lock-fill me-1 text-success"></i>
+            Your QBO password is never entered into or stored by this application. Authorization uses OAuth 2.0.
+            Tokens are encrypted before storage. Each company's data is fully isolated by Realm ID.
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

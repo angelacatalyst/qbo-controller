@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --sidebar-bg: #0d1117;
+      --sidebar-width: 240px;
+      --accent: #2563eb;
+      --accent-light: #3b82f6;
+      --success: #16a34a;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --orange: #ea580c;
+      --body-bg: #f8fafc;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --text-muted: #64748b;
+      --header-h: 56px;
+    }
+    body { background: var(--body-bg); font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+
+    /* Sidebar */
+    #sidebar {
+      width: var(--sidebar-width); min-height: 100vh; background: var(--sidebar-bg);
+      position: fixed; top: 0; left: 0; z-index: 1000; display: flex; flex-direction: column;
+    }
+    #sidebar .brand {
+      padding: 18px 20px 14px; border-bottom: 1px solid #1e2530;
+      color: #fff; font-weight: 700; font-size: 15px; line-height: 1.2;
+    }
+    #sidebar .brand small { display: block; font-size: 10px; color: #6b7280; font-weight: 400; letter-spacing: .05em; }
+    #sidebar .env-badge {
+      margin: 10px 16px; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+      text-align: center; background: {% if qbo_environment == 'sandbox' %}#854d0e{% else %}#166534{% endif %};
+      color: #fff; letter-spacing: .04em;
+    }
+    #sidebar .nav-section { padding: 12px 16px 4px; color: #4b5563; font-size: 10px; font-weight: 600; letter-spacing: .08em; }
+    #sidebar .nav-link {
+      display: flex; align-items: center; gap: 10px; padding: 8px 16px; color: #9ca3af;
+      text-decoration: none; border-radius: 6px; margin: 1px 8px; font-size: 13.5px; transition: .15s;
+    }
+    #sidebar .nav-link:hover, #sidebar .nav-link.active { background: #1e2530; color: #fff; }
+    #sidebar .nav-link i { font-size: 16px; width: 18px; flex-shrink: 0; }
+    #sidebar .company-list { flex: 1; overflow-y: auto; }
+    #sidebar .company-item {
+      display: block; padding: 8px 16px; color: #9ca3af; text-decoration: none;
+      font-size: 12.5px; margin: 1px 8px; border-radius: 6px; transition: .15s;
+    }
+    #sidebar .company-item:hover { background: #1e2530; color: #e5e7eb; }
+    #sidebar .company-item .dot {
+      display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 8px;
+    }
+    #sidebar .dot-connected { background: #22c55e; }
+    #sidebar .dot-disconnected { background: #6b7280; }
+
+    /* Main content */
+    #main { margin-left: var(--sidebar-width); min-height: 100vh; }
+
+    /* Top bar */
+    .topbar {
+      height: var(--header-h); background: #fff; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 24px; position: sticky; top: 0; z-index: 100;
+    }
+    .topbar .company-context {
+      display: flex; align-items: center; gap: 10px; flex: 1;
+    }
+    .realm-badge {
+      font-size: 11px; color: var(--text-muted); background: var(--body-bg);
+      padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); font-family: monospace;
+    }
+
+    /* Cards */
+    .kpi-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; }
+    .kpi-card .kpi-value { font-size: 28px; font-weight: 700; line-height: 1; }
+    .kpi-card .kpi-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+    /* Health Score Gauge */
+    .health-gauge {
+      position: relative; width: 120px; height: 120px; flex-shrink: 0;
+    }
+    .health-gauge canvas { width: 120px !important; height: 120px !important; }
+    .health-score-center {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      text-align: center; pointer-events: none;
+    }
+    .health-score-center .score { font-size: 28px; font-weight: 800; line-height: 1; }
+    .health-score-center .label { font-size: 10px; color: var(--text-muted); }
+
+    /* Issue severity */
+    .sev-critical { color: #dc2626; }
+    .sev-high { color: #d97706; }
+    .sev-medium { color: #2563eb; }
+    .sev-low { color: #6b7280; }
+    .sev-badge-critical { background: #fee2e2; color: #991b1b; }
+    .sev-badge-high { background: #fef3c7; color: #92400e; }
+    .sev-badge-medium { background: #dbeafe; color: #1e40af; }
+    .sev-badge-low { background: #f1f5f9; color: #475569; }
+
+    /* Table */
+    .table-hover tbody tr:hover { background: #f8fafc; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-connected { background: #22c55e; }
+    .status-disconnected { background: #6b7280; }
+    .status-expired { background: #f59e0b; }
+
+    /* Checklist */
+    .step-row { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .step-row:last-child { border-bottom: none; }
+    .step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--border); color: var(--text-muted); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+    .step-num.complete { background: #dcfce7; color: #166534; }
+    .step-num.in_progress { background: #dbeafe; color: #1e40af; }
+
+    /* Sync status */
+    .sync-bar { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 16px; font-size: 13px; color: #166534; }
+    .sync-bar.warning { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    .sync-bar.danger { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+
+    /* Mode banner */
+    .mode-banner {
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: #94a3b8; font-size: 11px; padding: 5px 24px;
+      display: flex; gap: 20px; border-bottom: 1px solid #1e293b;
+    }
+    .mode-banner .mode-item { display: flex; align-items: center; gap: 6px; }
+    .mode-banner .mode-on { color: #4ade80; }
+    .mode-banner .mode-off { color: #f87171; }
+
+    /* Alerts */
+    .alert-issue { border-left: 4px solid; border-radius: 0 8px 8px 0; }
+    .alert-issue.critical { border-left-color: #dc2626; }
+    .alert-issue.high { border-left-color: #d97706; }
+    .alert-issue.medium { border-left-color: #2563eb; }
+    .alert-issue.low { border-left-color: #94a3b8; }
+
+    /* Footer */
+    #sidebar .sidebar-footer {
+      padding: 12px 16px; border-top: 1px solid #1e2530; color: #4b5563; font-size: 11px;
+    }
+  </style>
+  {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div class="brand">
+    <i class="bi bi-cpu-fill" style="color:#2563eb;margin-right:6px;"></i>QBO AI Controller
+    <small>CONTROLLER PLATFORM · v1.0</small>
+  </div>
+  {% if qbo_environment %}
+  <div class="env-badge">{{ qbo_environment | upper }} ENVIRONMENT</div>
+  {% endif %}
+
+  <div class="nav-section">CONTROLLER</div>
+  <a href="/" class="nav-link {% if request.url.path == '/' %}active{% endif %}">
+    <i class="bi bi-grid-3x3-gap-fill"></i> Portfolio Dashboard
+  </a>
+  <a href="/qbo/connect" class="nav-link">
+    <i class="bi bi-plus-circle-fill"></i> Connect QBO Company
+  </a>
+
+  {% if companies is defined %}
+  <div class="nav-section" style="margin-top:8px;">COMPANY WORKSPACES</div>
+  <div class="company-list">
+    {% for co in companies %}
+    <a href="/company/{{ co.realm_id }}" class="company-item">
+      <span class="dot dot-{{ co.connection_status }}"></span>{{ co.company_name }}
+    </a>
+    {% endfor %}
+  </div>
+  {% elif company is defined %}
+  <div class="nav-section" style="margin-top:8px;">CURRENT WORKSPACE</div>
+  <a href="/company/{{ company.realm_id }}" class="nav-link {% if '/company/' in request.url.path and '/issues' not in request.url.path %}active{% endif %}">
+    <i class="bi bi-building"></i> Overview
+  </a>
+  <a href="/company/{{ company.realm_id }}/issues" class="nav-link {% if '/issues' in request.url.path %}active{% endif %}">
+    <i class="bi bi-exclamation-triangle-fill"></i> Issues
+  </a>
+  <a href="/company/{{ company.realm_id }}/journal-entries" class="nav-link {% if '/journal-entries' in request.url.path %}active{% endif %}">
+    <i class="bi bi-journal-text"></i> Journal Entries
+  </a>
+  <a href="/company/{{ company.realm_id }}/month-close" class="nav-link {% if '/month-close' in request.url.path %}active{% endif %}">
+    <i class="bi bi-calendar-check-fill"></i> Month-End Close
+  </a>
+  <a href="/company/{{ company.realm_id }}/audit" class="nav-link {% if '/audit' in request.url.path %}active{% endif %}">
+    <i class="bi bi-shield-check"></i> Audit Readiness
+  </a>
+  <a href="/company/{{ company.realm_id }}/reports" class="nav-link {% if '/reports' in request.url.path %}active{% endif %}">
+    <i class="bi bi-bar-chart-fill"></i> Financial Reports
+  </a>
+  <a href="/company/{{ company.realm_id }}/profile" class="nav-link {% if '/profile' in request.url.path %}active{% endif %}">
+    <i class="bi bi-gear-fill"></i> Company Profile
+  </a>
+  <a href="/company/{{ company.realm_id }}/changelog" class="nav-link {% if '/changelog' in request.url.path %}active{% endif %}">
+    <i class="bi bi-clock-history"></i> Change Log
+  </a>
+  <div class="nav-section" style="margin-top:8px;">NAVIGATION</div>
+  <a href="/" class="nav-link"><i class="bi bi-arrow-left-circle"></i> All Companies</a>
+  {% endif %}
+
+  <div class="sidebar-footer mt-auto">
+    <div>Mode: <span style="color:#4ade80;">READ-ONLY</span></div>
+    <div>Write requires approval</div>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <!-- Mode banner -->
+  <div class="mode-banner">
+    <div class="mode-item"><i class="bi bi-eye-fill mode-on"></i> DETECT</div>
+    <div class="mode-item"><i class="bi bi-search mode-on"></i> ANALYZE</div>
+    <div class="mode-item"><i class="bi bi-lightbulb mode-on"></i> RECOMMEND</div>
+    <div class="mode-item"><i class="bi bi-eye mode-on"></i> REVIEW</div>
+    <div class="mode-item"><i class="bi bi-check-circle mode-on"></i> APPROVE</div>
+    <div class="mode-item"><i class="bi bi-play-circle mode-on"></i> EXECUTE</div>
+    <div class="mode-item"><i class="bi bi-shield-check mode-on"></i> VERIFY</div>
+    <div class="mode-item"><i class="bi bi-file-text mode-on"></i> DOCUMENT</div>
+  </div>
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="company-context">
+      {% if company is defined %}
+        <i class="bi bi-building text-primary"></i>
+        <span class="fw-semibold">{{ company.company_name }}</span>
+        <span class="realm-badge">REALM: {{ company.realm_id }}</span>
+        <span class="badge {% if company.connection_status == 'connected' %}bg-success{% else %}bg-secondary{% endif %} ms-1" style="font-size:10px;">
+          {{ company.connection_status | upper }}
+        </span>
+      {% else %}
+        <i class="bi bi-cpu-fill text-primary"></i>
+        <span class="fw-semibold">{{ app_name }}</span>
+      {% endif %}
+    </div>
+    <div class="d-flex align-items-center gap-3">
+      {% if company is defined %}
+        <form method="post" action="/company/{{ company.realm_id }}/sync" class="d-inline">
+          <input type="hidden" name="sync_type" value="full">
+          <button class="btn btn-sm btn-outline-primary">
+            <i class="bi bi-arrow-repeat"></i> Sync QBO
+          </button>
+        </form>
+      {% endif %}
+      <a href="/qbo/connect" class="btn btn-sm btn-primary">
+        <i class="bi bi-plus-lg"></i> Connect Company
+      </a>
+    </div>
+  </div>
+
+  <!-- Flash messages -->
+  {% if request.query_params.get('connected') %}
+  <div class="alert alert-success alert-dismissible mx-4 mt-3 mb-0 fade show">
+    <i class="bi bi-check-circle-fill me-2"></i>
+    <strong>QBO Connected!</strong> Company workspace created. Run a sync to load accounting data.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('synced') %}
+  <div class="alert alert-{% if request.query_params.get('status') == 'success' %}success{% else %}warning{% endif %} alert-dismissible mx-4 mt-3 mb-0 fade show">
+    <i class="bi bi-arrow-repeat me-2"></i>
+    Sync complete — status: <strong>{{ request.query_params.get('status') }}</strong>.
+    Run <strong>Assessment</strong> to analyze the new data.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('assessed') %}
+  <div class="alert alert-info alert-dismissible mx-4 mt-3 mb-0 fade show">
+    <i class="bi bi-clipboard2-check me-2"></i>
+    Assessment complete — found <strong>{{ request.query_params.get('issues') }}</strong> issues.
+    Health Score: <strong>{{ request.query_params.get('score') }}</strong>.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('error') %}
+  <div class="alert alert-danger alert-dismissible mx-4 mt-3 mb-0 fade show">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    Error: {{ request.query_params.get('error') }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+
+  <!-- Content -->
+  <div class="p-4">
+    {% block content %}{% endblock %}
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/js/bootstrap.bundle.min.js"></script>
+{% block extra_js %}{% endblock %}
+</body>
+</html>

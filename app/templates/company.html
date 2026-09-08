@@ -1,0 +1,403 @@
+{% extends "base.html" %}
+{% block title %}{{ company.company_name }} — {{ app_name }}{% endblock %}
+
+{% block content %}
+<!-- COMPANY CONTEXT HEADER -->
+<div class="card border-0 mb-4" style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px;">
+  <div class="card-body p-4 text-white">
+    <div class="row align-items-center">
+      <div class="col">
+        <div class="text-uppercase small mb-1" style="color:#94a3b8;letter-spacing:.08em;">CURRENT COMPANY WORKSPACE</div>
+        <h4 class="mb-1 fw-bold">{{ company.company_name }}</h4>
+        <div class="d-flex flex-wrap gap-3 mt-2 small" style="color:#94a3b8;">
+          <span><i class="bi bi-key me-1"></i>Realm ID: <code style="color:#60a5fa;">{{ company.realm_id }}</code></span>
+          <span><i class="bi bi-link-45deg me-1"></i>
+            {% if company.connection_status == 'connected' %}<span class="text-success">● Connected</span>{% else %}<span class="text-muted">● Disconnected</span>{% endif %}
+          </span>
+          <span><i class="bi bi-cloud me-1"></i>{{ (company.qbo_environment or 'sandbox') | title }}</span>
+          {% if company.last_sync %}
+          <span><i class="bi bi-arrow-repeat me-1"></i>Last Sync: {{ company.last_sync | fmt_date }}</span>
+          {% endif %}
+          <span><i class="bi bi-calendar3 me-1"></i>Period: {{ data_period_start }} – {{ data_period_end }}</span>
+        </div>
+      </div>
+      <div class="col-auto">
+        <!-- Health Score -->
+        <div class="text-center">
+          <div style="font-size:48px;font-weight:900;line-height:1;color:{{
+            '#4ade80' if health.color == 'success' else
+            '#60a5fa' if health.color == 'primary' else
+            '#fbbf24' if health.color == 'warning' else
+            '#fb923c' if health.color == 'orange' else '#f87171'
+          }};">{{ health.score | int }}</div>
+          <div style="font-size:12px;color:#94a3b8;">HEALTH SCORE</div>
+          <div class="badge mt-1" style="background:rgba(255,255,255,.1);font-size:11px;">{{ health.label }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sync Status -->
+{% if not profile or not profile.data_as_of %}
+<div class="alert alert-warning d-flex align-items-center mb-4">
+  <i class="bi bi-exclamation-triangle-fill me-2"></i>
+  <div class="flex-grow-1"><strong>No accounting data loaded.</strong> Run a QBO Sync to load data, then run the Assessment.</div>
+  <form method="post" action="/company/{{ company.realm_id }}/sync" class="ms-3">
+    <input type="hidden" name="sync_type" value="full">
+    <button class="btn btn-warning btn-sm fw-semibold"><i class="bi bi-arrow-repeat me-1"></i>Sync Now</button>
+  </form>
+</div>
+{% else %}
+<div class="sync-bar mb-4 d-flex align-items-center justify-content-between">
+  <div>
+    <i class="bi bi-check-circle-fill me-2"></i>
+    <strong>QBO DATA CURRENT</strong> · Last Sync: {{ company.last_sync | fmt_date }}
+    · Status: <strong>{{ company.last_sync_status | title }}</strong>
+    · Data as of: {{ profile.data_as_of | fmt_date }}
+  </div>
+  <div class="d-flex gap-2">
+    <form method="post" action="/company/{{ company.realm_id }}/assess" class="d-inline">
+      <button class="btn btn-sm btn-outline-success fw-semibold"><i class="bi bi-clipboard2-check me-1"></i>Run Assessment</button>
+    </form>
+    <form method="post" action="/company/{{ company.realm_id }}/sync" class="d-inline">
+      <input type="hidden" name="sync_type" value="full">
+      <button class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-repeat me-1"></i>Re-Sync</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<!-- KPI Row -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value {% if severity_counts.critical > 0 %}text-danger{% else %}text-success{% endif %}">
+        {{ severity_counts.critical }}
+      </div>
+      <div class="kpi-label">🔴 Critical Issues</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value {% if severity_counts.high > 0 %}text-warning{% else %}text-success{% endif %}">
+        {{ severity_counts.high }}
+      </div>
+      <div class="kpi-label">🟠 High Priority</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value {% if pending_jes > 0 %}text-primary{% else %}text-muted{% endif %}">
+        {{ pending_jes }}
+      </div>
+      <div class="kpi-label">📋 Pending JEs</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card">
+      <div class="kpi-value {% if month_close and month_close.status == 'closed' %}text-success{% else %}text-warning{% endif %}">
+        {% if month_close %}{{ month_close.status | title }}{% else %}Not Started{% endif %}
+      </div>
+      <div class="kpi-label">📅 Month-End Status</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <!-- LEFT: Balance Sheet + P&L -->
+  <div class="col-lg-7">
+
+    <!-- Financial Summary -->
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-bar-chart-fill me-2 text-primary"></i>FINANCIAL SUMMARY</h6>
+        <a href="/company/{{ company.realm_id }}/reports" class="btn btn-sm btn-outline-secondary">Full Reports</a>
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <!-- Balance Sheet -->
+          <div class="col-md-6">
+            <div class="fw-semibold mb-2 small text-muted text-uppercase">BALANCE SHEET</div>
+            {% if bs.total_assets %}
+            <table class="table table-sm mb-0">
+              <tr><td class="text-muted small">Total Assets</td><td class="text-end fw-semibold">{{ bs.total_assets | currency }}</td></tr>
+              <tr><td class="text-muted small">Total Liabilities</td><td class="text-end">{{ bs.total_liabilities | currency }}</td></tr>
+              <tr><td class="text-muted small">Total Equity</td><td class="text-end">{{ bs.total_equity | currency }}</td></tr>
+              <tr><td class="text-muted small">Accounts Receivable</td><td class="text-end">{{ bs.accounts_receivable | currency }}</td></tr>
+              <tr><td class="text-muted small">Accounts Payable</td><td class="text-end">{{ bs.accounts_payable | currency }}</td></tr>
+              {% if bs.opening_balance_equity %}
+              <tr class="table-warning">
+                <td class="small"><i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>Opening Bal. Equity</td>
+                <td class="text-end fw-bold text-danger">{{ bs.opening_balance_equity | currency }}</td>
+              </tr>
+              {% endif %}
+              {% if bs.undeposited_funds %}
+              <tr class="table-warning">
+                <td class="small"><i class="bi bi-exclamation-circle text-warning me-1"></i>Undeposited Funds</td>
+                <td class="text-end fw-semibold">{{ bs.undeposited_funds | currency }}</td>
+              </tr>
+              {% endif %}
+            </table>
+            {% else %}
+            <div class="text-muted small"><i class="bi bi-info-circle me-1"></i>Sync required</div>
+            {% endif %}
+          </div>
+
+          <!-- P&L -->
+          <div class="col-md-6">
+            <div class="fw-semibold mb-2 small text-muted text-uppercase">PROFIT & LOSS (YTD)</div>
+            {% if pl.total_income %}
+            <table class="table table-sm mb-0">
+              <tr><td class="text-muted small">Total Revenue</td><td class="text-end fw-semibold text-success">{{ pl.total_income | currency }}</td></tr>
+              <tr><td class="text-muted small">Cost of Goods Sold</td><td class="text-end">{{ pl.total_cogs | currency }}</td></tr>
+              <tr><td class="text-muted small">Gross Profit</td><td class="text-end fw-semibold">{{ pl.gross_profit | currency }}</td></tr>
+              <tr><td class="text-muted small">Total Expenses</td><td class="text-end">{{ pl.total_expenses | currency }}</td></tr>
+              <tr class="{% if pl.net_income and pl.net_income < 0 %}table-danger{% else %}table-success{% endif %}">
+                <td class="small fw-bold">Net Income</td>
+                <td class="text-end fw-bold">{{ pl.net_income | currency }}</td>
+              </tr>
+              {% if pl.uncategorized_income %}
+              <tr class="table-warning">
+                <td class="small"><i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>Uncategorized Inc.</td>
+                <td class="text-end fw-bold text-danger">{{ pl.uncategorized_income | currency }}</td>
+              </tr>
+              {% endif %}
+              {% if pl.uncategorized_expense %}
+              <tr class="table-warning">
+                <td class="small"><i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>Uncategorized Exp.</td>
+                <td class="text-end fw-bold text-danger">{{ pl.uncategorized_expense | currency }}</td>
+              </tr>
+              {% endif %}
+            </table>
+            {% else %}
+            <div class="text-muted small"><i class="bi bi-info-circle me-1"></i>Sync required</div>
+            {% endif %}
+          </div>
+
+          <!-- AR & AP Aging -->
+          {% if ar.total_ar or ap.total_ap %}
+          <div class="col-12 mt-1">
+            <hr class="my-2">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <div class="fw-semibold mb-2 small text-muted text-uppercase">AR AGING</div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Total AR:</span>
+                  <span class="fw-semibold">{{ ar.total_ar | currency }}</span>
+                </div>
+                <div class="progress mb-1" style="height:6px;">
+                  <div class="progress-bar bg-success" style="width:{{ (ar.current / (ar.total_ar or 1) * 100) | int }}%"></div>
+                  <div class="progress-bar bg-warning" style="width:{{ (ar.overdue_30 / (ar.total_ar or 1) * 100) | int }}%"></div>
+                  <div class="progress-bar bg-orange" style="width:{{ (ar.overdue_60 / (ar.total_ar or 1) * 100) | int }}%"></div>
+                  <div class="progress-bar bg-danger" style="width:{{ ((ar.overdue_90 + ar.overdue_90_plus) / (ar.total_ar or 1) * 100) | int }}%"></div>
+                </div>
+                <div class="d-flex justify-content-between" style="font-size:10px;color:#94a3b8;">
+                  <span>Current</span><span>30d</span><span>60d</span><span>90d+</span>
+                </div>
+                {% if ar.overdue_90_plus > 500 %}
+                <div class="text-danger small mt-1"><i class="bi bi-exclamation-triangle-fill me-1"></i>{{ ar.overdue_90_plus | currency }} over 90 days</div>
+                {% endif %}
+              </div>
+              <div class="col-md-6">
+                <div class="fw-semibold mb-2 small text-muted text-uppercase">AP AGING</div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Total AP:</span>
+                  <span class="fw-semibold">{{ ap.total_ap | currency }}</span>
+                </div>
+                <div class="progress mb-1" style="height:6px;">
+                  <div class="progress-bar bg-success" style="width:{{ (ap.current / (ap.total_ap or 1) * 100) | int }}%"></div>
+                  <div class="progress-bar bg-warning" style="width:{{ (ap.overdue_30 / (ap.total_ap or 1) * 100) | int }}%"></div>
+                  <div class="progress-bar bg-danger" style="width:{{ ((ap.overdue_60 + ap.overdue_90 + ap.overdue_90_plus) / (ap.total_ap or 1) * 100) | int }}%"></div>
+                </div>
+                <div class="d-flex justify-content-between" style="font-size:10px;color:#94a3b8;">
+                  <span>Current</span><span>30d</span><span>60d+</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Accounting Health Breakdown -->
+    {% if health.category_scores %}
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-heart-pulse-fill me-2 text-danger"></i>ACCOUNTING HEALTH BREAKDOWN</h6>
+      </div>
+      <div class="card-body">
+        {% set cat_labels = {
+          'bank_reconciliation': 'Bank Reconciliation',
+          'credit_card_reconciliation': 'Credit Card Rec.',
+          'balance_sheet_integrity': 'Balance Sheet Integrity',
+          'pl_integrity': 'P&L Integrity',
+          'ar_status': 'Accounts Receivable',
+          'ap_status': 'Accounts Payable',
+          'uncategorized_transactions': 'Uncategorized Transactions',
+          'payroll': 'Payroll',
+          'sales_tax': 'Sales Tax',
+          'equity_review': 'Equity Review',
+        } %}
+        {% set cat_max = {
+          'bank_reconciliation': 20,
+          'credit_card_reconciliation': 8,
+          'balance_sheet_integrity': 18,
+          'pl_integrity': 10,
+          'ar_status': 10,
+          'ap_status': 8,
+          'uncategorized_transactions': 10,
+          'payroll': 6,
+          'sales_tax': 5,
+          'equity_review': 5,
+        } %}
+        {% for key, label in cat_labels.items() %}
+        {% set score = health.category_scores.get(key, 0) %}
+        {% set maximum = cat_max.get(key, 10) %}
+        {% set pct = (score / maximum * 100) | int %}
+        <div class="mb-2">
+          <div class="d-flex justify-content-between small mb-1">
+            <span>{{ label }}</span>
+            <span class="fw-semibold {% if pct >= 80 %}text-success{% elif pct >= 60 %}text-warning{% else %}text-danger{% endif %}">
+              {{ score | int }}/{{ maximum }}
+            </span>
+          </div>
+          <div class="progress" style="height:8px;border-radius:4px;">
+            <div class="progress-bar {% if pct >= 80 %}bg-success{% elif pct >= 60 %}bg-warning{% else %}bg-danger{% endif %}"
+                 style="width:{{ pct }}%;transition:width 1s;"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+
+  <!-- RIGHT: Issues + Actions -->
+  <div class="col-lg-5">
+
+    <!-- WHAT REQUIRES ATTENTION -->
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-exclamation-triangle-fill me-2 text-warning"></i>WHAT REQUIRES ATTENTION</h6>
+        <a href="/company/{{ company.realm_id }}/issues" class="btn btn-sm btn-outline-secondary">View All</a>
+      </div>
+      <div class="card-body p-0">
+        {% if issues %}
+        <div style="max-height:420px;overflow-y:auto;">
+          {% for issue in issues[:15] %}
+          <div class="p-3 border-bottom alert-issue {{ issue.severity }}" style="font-size:13px;">
+            <div class="d-flex align-items-start gap-2">
+              <span class="mt-1">
+                {% if issue.severity == 'critical' %}🔴{% elif issue.severity == 'high' %}🟠{% elif issue.severity == 'medium' %}🟡{% else %}🟢{% endif %}
+              </span>
+              <div class="flex-grow-1">
+                <div class="fw-semibold">{{ issue.title }}</div>
+                <div class="text-muted small mt-1">{{ issue.description[:120] }}{% if issue.description|length > 120 %}…{% endif %}</div>
+                {% if issue.recommended_action %}
+                <div class="small mt-1" style="color:#2563eb;"><i class="bi bi-arrow-right me-1"></i>{{ issue.recommended_action[:100] }}{% if issue.recommended_action|length > 100 %}…{% endif %}</div>
+                {% endif %}
+                {% if issue.financial_impact %}
+                <div class="small text-muted mt-1">Financial Impact: <strong>{{ issue.financial_impact | currency }}</strong></div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="p-4 text-center text-muted">
+          <i class="bi bi-check-circle-fill text-success" style="font-size:32px;"></i>
+          <div class="mt-2">No open issues found</div>
+          {% if not profile or not profile.data_as_of %}
+          <div class="small mt-1">Run a Sync and Assessment to check for issues</div>
+          {% else %}
+          <div class="small mt-1">Run Assessment to refresh</div>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% if issues %}
+      <div class="card-footer bg-white border-top py-2">
+        <div class="d-flex gap-2 justify-content-between small">
+          <span class="text-danger fw-semibold">{{ severity_counts.critical }} Critical</span>
+          <span class="text-warning fw-semibold">{{ severity_counts.high }} High</span>
+          <span class="text-primary fw-semibold">{{ severity_counts.medium }} Medium</span>
+          <span class="text-muted fw-semibold">{{ severity_counts.low }} Low</span>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-lightning-fill me-2 text-primary"></i>CONTROLLER ACTIONS</h6>
+      </div>
+      <div class="card-body d-grid gap-2">
+        <form method="post" action="/company/{{ company.realm_id }}/assess">
+          <button class="btn btn-outline-success w-100 text-start">
+            <i class="bi bi-clipboard2-check me-2"></i> Run Full Accounting Assessment
+          </button>
+        </form>
+        <a href="/company/{{ company.realm_id }}/issues" class="btn btn-outline-warning text-start">
+          <i class="bi bi-exclamation-triangle me-2"></i> Review All Issues
+        </a>
+        <a href="/company/{{ company.realm_id }}/journal-entries" class="btn btn-outline-primary text-start">
+          <i class="bi bi-journal-text me-2"></i> Journal Entry Approval Workflow
+        </a>
+        <a href="/company/{{ company.realm_id }}/month-close" class="btn btn-outline-secondary text-start">
+          <i class="bi bi-calendar-check me-2"></i> Month-End Close Checklist
+        </a>
+        <a href="/company/{{ company.realm_id }}/audit" class="btn btn-outline-dark text-start">
+          <i class="bi bi-shield-check me-2"></i> Audit Readiness Report
+        </a>
+        <a href="/company/{{ company.realm_id }}/reports" class="btn btn-outline-info text-start">
+          <i class="bi bi-bar-chart me-2"></i> Financial Reports
+        </a>
+      </div>
+    </div>
+
+    <!-- Bank & Credit Card Accounts -->
+    {% if profile and profile.bank_accounts %}
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-bank me-2"></i>BANK ACCOUNTS</h6>
+      </div>
+      <div class="card-body p-0">
+        {% for bank in profile.bank_accounts %}
+        <div class="p-3 border-bottom d-flex justify-content-between align-items-center">
+          <div>
+            <div class="fw-semibold small">{{ bank.name }}</div>
+            <div class="text-muted" style="font-size:11px;">Bank Account · ID: {{ bank.id }}</div>
+          </div>
+          <div class="text-end">
+            <div class="fw-bold {% if bank.balance < 0 %}text-danger{% endif %}">{{ bank.balance | currency }}</div>
+            <div class="text-muted" style="font-size:10px;">QBO Balance</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Disconnect -->
+    <div class="card border-0 shadow-sm">
+      <div class="card-body py-3">
+        <div class="d-flex align-items-center justify-content-between">
+          <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>QBO Connection</span>
+          <form method="post" action="/qbo/disconnect/{{ company.realm_id }}"
+                onsubmit="return confirm('Disconnect {{ company.company_name }} from QBO? Data will be preserved.');">
+            <button class="btn btn-sm btn-outline-danger">
+              <i class="bi bi-x-circle me-1"></i>Disconnect QBO
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

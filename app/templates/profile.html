@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}Company Profile — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">COMPANY ACCOUNTING PROFILE</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · Controller Configuration</p>
+  </div>
+  <span class="badge bg-info">Realm: {{ company.realm_id }}</span>
+</div>
+
+<form method="post" action="/company/{{ company.realm_id }}/profile">
+<div class="row g-4">
+
+  <!-- Entity & Structure -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-building me-2 text-primary"></i>ENTITY & STRUCTURE</h6>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Industry / Business Type</label>
+          <select name="industry" class="form-select form-select-sm">
+            <option value="">— Select Industry —</option>
+            {% set industries = ['Restaurant / Food Service', 'Retail', 'E-Commerce', 'Construction / Contracting',
+              'Healthcare / Medical', 'Legal Services', 'Consulting / Professional Services',
+              'Non-Profit / 501(c)(3)', 'Real Estate', 'Property Management',
+              'Manufacturing', 'Wholesale / Distribution', 'Technology / SaaS',
+              'Transportation / Logistics', 'Hospitality / Hotel', 'Education',
+              'Financial Services', 'Other'] %}
+            {% for ind in industries %}
+            <option value="{{ ind }}" {% if profile and profile.industry == ind %}selected{% endif %}>{{ ind }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Legal Entity Type</label>
+          <select name="entity_type" class="form-select form-select-sm">
+            <option value="">— Select Entity —</option>
+            {% for et in ['Sole Proprietor', 'Single-Member LLC', 'Multi-Member LLC', 'S-Corporation', 'C-Corporation', 'Partnership', 'Non-Profit Corporation', 'LLP'] %}
+            <option value="{{ et }}" {% if profile and profile.entity_type == et %}selected{% endif %}>{{ et }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Accounting Method</label>
+          <select name="accounting_method" class="form-select form-select-sm">
+            <option value="accrual" {% if profile and profile.accounting_method == 'accrual' %}selected{% endif %}>Accrual Basis</option>
+            <option value="cash" {% if profile and profile.accounting_method == 'cash' %}selected{% endif %}>Cash Basis</option>
+            <option value="modified_cash" {% if profile and profile.accounting_method == 'modified_cash' %}selected{% endif %}>Modified Cash Basis</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Fiscal Year Start Month</label>
+          <select name="fiscal_year_start_month" class="form-select form-select-sm">
+            {% set months = ['January','February','March','April','May','June','July','August','September','October','November','December'] %}
+            {% for m in months %}
+            <option value="{{ loop.index }}" {% if profile and profile.fiscal_year_start_month == loop.index %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-0">
+          <label class="form-label fw-semibold small">Functional Currency</label>
+          <input type="text" name="currency" class="form-control form-control-sm"
+                 value="{{ profile.currency if profile else 'USD' }}" placeholder="USD">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Payroll & Tax -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-cash-stack me-2 text-warning"></i>PAYROLL & TAX</h6>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Payroll System</label>
+          <select name="payroll_system" class="form-select form-select-sm">
+            <option value="">— None / Not Applicable —</option>
+            {% for ps in ['QuickBooks Payroll', 'Gusto', 'ADP', 'Paychex', 'Rippling', 'Justworks', 'Bamboo HR', 'Patriot Payroll', 'Square Payroll', 'Manual / In-House', 'Other'] %}
+            <option value="{{ ps }}" {% if profile and profile.payroll_system == ps %}selected{% endif %}>{{ ps }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Sales Tax Agency / State</label>
+          <input type="text" name="sales_tax_agency" class="form-control form-control-sm"
+                 value="{{ profile.sales_tax_agency or '' }}"
+                 placeholder="e.g., Florida DOR, California CDTFA">
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Fixed Asset Capitalization Threshold ($)</label>
+          <input type="number" name="capitalization_threshold" class="form-control form-control-sm"
+                 value="{{ profile.capitalization_threshold or 2500 }}"
+                 min="500" step="500" placeholder="2500">
+          <div class="form-text">Assets above this amount are capitalized; below are expensed.</div>
+        </div>
+        <div class="mb-0">
+          <label class="form-label fw-semibold small">Tax Year End</label>
+          <input type="text" name="tax_year_end" class="form-control form-control-sm"
+                 value="{{ profile.tax_year_end if profile and profile.tax_year_end else 'December 31' }}"
+                 placeholder="December 31">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Merchant Processors -->
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-credit-card me-2 text-success"></i>MERCHANT PROCESSORS & PAYMENT PLATFORMS</h6>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          Select all payment processors used. The controller will flag gross-vs-net reconciliation requirements for each selected processor.
+        </p>
+        <div class="row g-2">
+          {% set processors = [
+            ('stripe', 'Stripe', 'bi-stripe'),
+            ('square', 'Square', 'bi-square'),
+            ('paypal', 'PayPal', 'bi-paypal'),
+            ('toast', 'Toast POS', 'bi-fire'),
+            ('clover', 'Clover', 'bi-flower1'),
+            ('shopify', 'Shopify Payments', 'bi-shop'),
+            ('doordash', 'DoorDash', 'bi-bicycle'),
+            ('ubereats', 'Uber Eats', 'bi-bicycle'),
+            ('grubhub', 'Grubhub', 'bi-bag'),
+            ('amazon', 'Amazon Pay', 'bi-amazon'),
+            ('venmo_biz', 'Venmo Business', 'bi-phone'),
+            ('zelle', 'Zelle', 'bi-phone'),
+            ('other_processor', 'Other Processor', 'bi-plus-circle')
+          ] %}
+          {% set current_processors = profile.merchant_processors if profile and profile.merchant_processors else [] %}
+          {% for key, label, icon in processors %}
+          <div class="col-md-3 col-6">
+            <div class="form-check p-0">
+              <label class="d-flex align-items-center gap-2 p-2 rounded-2 border cursor-pointer {% if key in current_processors %}border-success bg-light{% endif %}" style="cursor:pointer;">
+                <input class="form-check-input m-0" type="checkbox" name="merchant_processors" value="{{ key }}"
+                       {% if key in current_processors %}checked{% endif %}>
+                <i class="bi {{ icon }} text-muted"></i>
+                <span class="small">{{ label }}</span>
+              </label>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bank Accounts -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-bank me-2 text-info"></i>BANK ACCOUNTS IN QBO</h6>
+      </div>
+      <div class="card-body">
+        {% if profile and profile.bank_accounts %}
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead class="table-light"><tr><th>Account Name</th><th>Classification</th></tr></thead>
+            <tbody>
+              {% for acct in profile.bank_accounts %}
+              <tr>
+                <td class="small">{{ acct.get('name', acct) if acct is mapping else acct }}</td>
+                <td><span class="badge bg-light text-dark border">Bank</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="text-center text-muted py-3 small"><i class="bi bi-info-circle me-1"></i>Run a sync to auto-populate bank accounts from QBO.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Credit Cards -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-credit-card-2-front me-2 text-danger"></i>CREDIT CARDS IN QBO</h6>
+      </div>
+      <div class="card-body">
+        {% if profile and profile.credit_cards %}
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead class="table-light"><tr><th>Account Name</th><th>Classification</th></tr></thead>
+            <tbody>
+              {% for card in profile.credit_cards %}
+              <tr>
+                <td class="small">{{ card.get('name', card) if card is mapping else card }}</td>
+                <td><span class="badge bg-light text-dark border">Credit Card</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="text-center text-muted py-3 small"><i class="bi bi-info-circle me-1"></i>Run a sync to auto-populate credit cards from QBO.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Controller Notes -->
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-journal-text me-2 text-secondary"></i>CONTROLLER NOTES & APPROVED ACCOUNTING DECISIONS</h6>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Controller Notes</label>
+          <textarea name="controller_notes" class="form-control form-control-sm" rows="4"
+                    placeholder="Document accounting decisions, known issues, client-specific rules...">{{ profile.controller_notes if profile and profile.controller_notes else '' }}</textarea>
+          <div class="form-text">Internal controller notes — not visible to clients. Document exceptions, approved treatments, and known quirks.</div>
+        </div>
+        <div class="mb-0">
+          <label class="form-label fw-semibold small">Approved Accounting Decisions</label>
+          <textarea name="approved_decisions" class="form-control form-control-sm" rows="3"
+                    placeholder="Document explicitly approved accounting treatments, e.g.: 'Approved to expense all items under $2,500 per IRS safe harbor election dated 2024-01-01'">{{ profile.approved_decisions if profile and profile.approved_decisions else '' }}</textarea>
+          <div class="form-text">Formally documented controller approvals for non-standard accounting treatments.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="d-flex justify-content-end gap-2 mt-4">
+  <a href="/company/{{ company.realm_id }}" class="btn btn-outline-secondary">Cancel</a>
+  <button type="submit" class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Save Profile</button>
+</div>
+</form>
+
+{% if profile and profile.health_score %}
+<div class="card border-0 shadow-sm mt-4">
+  <div class="card-header bg-white py-3 border-bottom">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-info-circle me-2 text-muted"></i>SYNC METADATA (Read-Only)</h6>
+  </div>
+  <div class="card-body">
+    <div class="row g-3 text-center">
+      <div class="col-md-3">
+        <div class="text-muted small">Health Score</div>
+        <div class="fw-bold fs-4">{{ profile.health_score | int if profile.health_score else '—' }}</div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">Last Synced</div>
+        <div class="fw-bold small">{{ company.last_sync | fmt_date if company.last_sync else 'Never' }}</div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">QBO Environment</div>
+        <div class="fw-bold small">{{ company.qbo_environment | title }}</div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">Connection Status</div>
+        <span class="badge {% if company.connection_status == 'connected' %}bg-success{% else %}bg-secondary{% endif %}">
+          {{ company.connection_status | title }}
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

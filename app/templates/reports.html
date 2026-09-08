@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}Financial Reports — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">FINANCIAL REPORTS — CONTROLLER REVIEW</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · {% if data_as_of %}Data as of {{ data_as_of | fmt_date }}{% else %}No data — run a sync{% endif %}</p>
+  </div>
+  <form method="post" action="/company/{{ company.realm_id }}/sync">
+    <input type="hidden" name="sync_type" value="full">
+    <button class="btn btn-outline-primary"><i class="bi bi-arrow-repeat me-1"></i>Refresh from QBO</button>
+  </form>
+</div>
+
+<!-- Important Note -->
+<div class="alert alert-info mb-4 small">
+  <i class="bi bi-info-circle-fill me-2"></i>
+  <strong>READ-ONLY MODE:</strong> These reports display live QBO data. Financial data is never modified without explicit approval.
+  All figures are pulled directly from QuickBooks Online for company Realm ID: <code>{{ company.realm_id }}</code>
+</div>
+
+<div class="row g-4">
+  <!-- Balance Sheet -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-layout-three-columns me-2 text-primary"></i>BALANCE SHEET</h6>
+        <span class="text-muted small">As of {{ data_as_of | fmt_date if data_as_of else 'N/A' }}</span>
+      </div>
+      <div class="card-body">
+        {% if bs.total_assets %}
+        <table class="table table-sm mb-0">
+          <thead class="table-light"><tr><th>Account</th><th class="text-end">Balance</th></tr></thead>
+          <tbody>
+            <tr class="fw-semibold table-primary"><td>TOTAL ASSETS</td><td class="text-end">{{ bs.total_assets | currency }}</td></tr>
+            <tr><td class="ps-3 text-muted small">Cash & Bank</td><td class="text-end small">{{ bs.cash_and_bank | currency }}</td></tr>
+            <tr {% if bs.accounts_receivable > 0 %}class="table-info"{% endif %}>
+              <td class="ps-3 small">Accounts Receivable</td><td class="text-end small">{{ bs.accounts_receivable | currency }}</td></tr>
+            {% if bs.undeposited_funds > 0 %}
+            <tr class="table-warning"><td class="ps-3 small"><i class="bi bi-exclamation-triangle me-1 text-warning"></i>Undeposited Funds</td><td class="text-end small fw-bold">{{ bs.undeposited_funds | currency }}</td></tr>
+            {% endif %}
+            <tr class="fw-semibold table-warning"><td>TOTAL LIABILITIES</td><td class="text-end">{{ bs.total_liabilities | currency }}</td></tr>
+            <tr><td class="ps-3 text-muted small">Accounts Payable</td><td class="text-end small">{{ bs.accounts_payable | currency }}</td></tr>
+            <tr class="fw-semibold"><td>TOTAL EQUITY</td><td class="text-end">{{ bs.total_equity | currency }}</td></tr>
+            {% if bs.retained_earnings %}
+            <tr><td class="ps-3 text-muted small">Retained Earnings</td><td class="text-end small">{{ bs.retained_earnings | currency }}</td></tr>
+            {% endif %}
+            {% if bs.opening_balance_equity %}
+            <tr class="table-danger"><td class="ps-3 small text-danger"><i class="bi bi-exclamation-circle-fill me-1"></i>Opening Bal. Equity</td><td class="text-end small fw-bold text-danger">{{ bs.opening_balance_equity | currency }}</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-center text-muted py-3"><i class="bi bi-info-circle me-1"></i>No data — run a sync</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- P&L -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-graph-up me-2 text-success"></i>PROFIT & LOSS (YTD)</h6>
+        <span class="text-muted small">Jan–{{ data_as_of | fmt_date if data_as_of else 'N/A' }}</span>
+      </div>
+      <div class="card-body">
+        {% if pl.total_income %}
+        <table class="table table-sm mb-0">
+          <thead class="table-light"><tr><th>Account</th><th class="text-end">Amount</th></tr></thead>
+          <tbody>
+            <tr class="fw-semibold text-success"><td>TOTAL REVENUE</td><td class="text-end">{{ pl.total_income | currency }}</td></tr>
+            {% if pl.uncategorized_income > 0 %}
+            <tr class="table-danger"><td class="ps-3 small text-danger"><i class="bi bi-exclamation-triangle me-1"></i>Uncategorized Income</td><td class="text-end small fw-bold text-danger">{{ pl.uncategorized_income | currency }}</td></tr>
+            {% endif %}
+            <tr><td class="ps-3 text-muted small">Cost of Goods Sold</td><td class="text-end small">{{ pl.total_cogs | currency }}</td></tr>
+            <tr class="fw-semibold"><td>GROSS PROFIT</td><td class="text-end fw-bold">{{ pl.gross_profit | currency }}</td></tr>
+            {% if pl.total_income > 0 %}
+            <tr><td class="text-muted small ps-3">Gross Margin</td><td class="text-end small">{{ ((pl.gross_profit / pl.total_income) * 100) | round(1) }}%</td></tr>
+            {% endif %}
+            <tr><td class="text-muted small">Total Expenses</td><td class="text-end small">{{ pl.total_expenses | currency }}</td></tr>
+            {% if pl.uncategorized_expense > 0 %}
+            <tr class="table-danger"><td class="ps-3 small text-danger"><i class="bi bi-exclamation-triangle me-1"></i>Uncategorized Exp.</td><td class="text-end small fw-bold text-danger">{{ pl.uncategorized_expense | currency }}</td></tr>
+            {% endif %}
+            <tr class="fw-semibold {% if pl.net_income < 0 %}table-danger{% else %}table-success{% endif %}">
+              <td>NET INCOME</td><td class="text-end fw-bold">{{ pl.net_income | currency }}</td>
+            </tr>
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-center text-muted py-3"><i class="bi bi-info-circle me-1"></i>No data — run a sync</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- AR Aging -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-people me-2 text-info"></i>AR AGING SUMMARY</h6>
+      </div>
+      <div class="card-body">
+        {% if ar.total_ar %}
+        <div class="mb-3">
+          <div class="d-flex justify-content-between mb-1"><span class="fw-bold">Total AR</span><span class="fw-bold">{{ ar.total_ar | currency }}</span></div>
+          <div class="progress" style="height:8px;">
+            <div class="progress-bar bg-success" title="Current" style="width:{{ (ar.current / ar.total_ar * 100) | int }}%"></div>
+            <div class="progress-bar bg-info" title="1-30 days" style="width:{{ (ar.overdue_30 / ar.total_ar * 100) | int }}%"></div>
+            <div class="progress-bar bg-warning" title="31-60 days" style="width:{{ (ar.overdue_60 / ar.total_ar * 100) | int }}%"></div>
+            <div class="progress-bar bg-orange" title="61-90 days" style="width:{{ (ar.overdue_90 / ar.total_ar * 100) | int }}%"></div>
+            <div class="progress-bar bg-danger" title="90+ days" style="width:{{ (ar.overdue_90_plus / ar.total_ar * 100) | int }}%"></div>
+          </div>
+        </div>
+        <table class="table table-sm mb-0">
+          <tr><td class="text-muted">Current</td><td class="text-end">{{ ar.current | currency }}</td></tr>
+          <tr><td class="text-muted">1 – 30 days</td><td class="text-end">{{ ar.overdue_30 | currency }}</td></tr>
+          <tr><td class="text-muted">31 – 60 days</td><td class="text-end text-warning">{{ ar.overdue_60 | currency }}</td></tr>
+          <tr><td class="text-muted">61 – 90 days</td><td class="text-end text-warning">{{ ar.overdue_90 | currency }}</td></tr>
+          <tr {% if ar.overdue_90_plus > 0 %}class="table-danger"{% endif %}>
+            <td class="text-muted">Over 90 days</td><td class="text-end fw-bold {% if ar.overdue_90_plus > 0 %}text-danger{% endif %}">{{ ar.overdue_90_plus | currency }}</td>
+          </tr>
+        </table>
+        {% else %}
+        <div class="text-center text-muted py-3"><i class="bi bi-info-circle me-1"></i>No AR data</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- AP Aging -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-shop me-2 text-warning"></i>AP AGING SUMMARY</h6>
+      </div>
+      <div class="card-body">
+        {% if ap.total_ap %}
+        <div class="mb-3">
+          <div class="d-flex justify-content-between mb-1"><span class="fw-bold">Total AP</span><span class="fw-bold">{{ ap.total_ap | currency }}</span></div>
+          <div class="progress" style="height:8px;">
+            <div class="progress-bar bg-success" style="width:{{ (ap.current / ap.total_ap * 100) | int }}%"></div>
+            <div class="progress-bar bg-warning" style="width:{{ (ap.overdue_30 / ap.total_ap * 100) | int }}%"></div>
+            <div class="progress-bar bg-danger" style="width:{{ ((ap.overdue_60 + ap.overdue_90 + ap.overdue_90_plus) / ap.total_ap * 100) | int }}%"></div>
+          </div>
+        </div>
+        <table class="table table-sm mb-0">
+          <tr><td class="text-muted">Current</td><td class="text-end">{{ ap.current | currency }}</td></tr>
+          <tr><td class="text-muted">1 – 30 days</td><td class="text-end text-warning">{{ ap.overdue_30 | currency }}</td></tr>
+          <tr><td class="text-muted">31 – 60 days</td><td class="text-end text-danger">{{ ap.overdue_60 | currency }}</td></tr>
+          <tr><td class="text-muted">61 – 90 days</td><td class="text-end text-danger">{{ ap.overdue_90 | currency }}</td></tr>
+          <tr><td class="text-muted">Over 90 days</td><td class="text-end text-danger fw-bold">{{ ap.overdue_90_plus | currency }}</td></tr>
+        </table>
+        {% else %}
+        <div class="text-center text-muted py-3"><i class="bi bi-info-circle me-1"></i>No AP data</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Revenue Analysis -->
+  {% if revenue %}
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white py-3 border-bottom">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-currency-dollar me-2 text-success"></i>REVENUE CONTROLLER REVIEW</h6>
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-3">
+            <div class="kpi-card"><div class="kpi-value text-success">{{ revenue.total_revenue | currency }}</div><div class="kpi-label">Total Revenue (YTD)</div></div>
+          </div>
+          <div class="col-md-3">
+            <div class="kpi-card"><div class="kpi-value">{{ revenue.gross_profit | currency }}</div><div class="kpi-label">Gross Profit</div></div>
+          </div>
+          <div class="col-md-3">
+            <div class="kpi-card"><div class="kpi-value">{{ revenue.gross_margin_pct | round(1) }}%</div><div class="kpi-label">Gross Margin</div></div>
+          </div>
+          <div class="col-md-3">
+            <div class="kpi-card"><div class="kpi-value {% if revenue.net_income < 0 %}text-danger{% else %}text-success{% endif %}">{{ revenue.net_income | currency }}</div><div class="kpi-label">Net Income</div></div>
+          </div>
+        </div>
+        {% if revenue.uncategorized_income > 0 %}
+        <div class="alert alert-danger mt-3 mb-0">
+          <i class="bi bi-exclamation-triangle-fill me-2"></i>
+          <strong>{{ revenue.uncategorized_income | currency }}</strong> in Uncategorized Income requires reclassification.
+        </div>
+        {% endif %}
+        {% if revenue.merchant_processors %}
+        <div class="alert alert-info mt-3 mb-0 small">
+          <i class="bi bi-info-circle me-1"></i>
+          <strong>Merchant Processors:</strong> {{ revenue.merchant_processors | join(', ') }} detected.
+          Reconcile gross processor revenue against net bank deposits. Never use net deposits as gross revenue.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Audit Readiness — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h5 class="fw-bold mb-0">AUDIT READINESS REPORT</h5>
+    <p class="text-muted small mb-0">{{ company.company_name }} · Realm: {{ company.realm_id }}</p>
+  </div>
+  <form method="post" action="/company/{{ company.realm_id }}/assess">
+    <button class="btn btn-outline-primary"><i class="bi bi-arrow-repeat me-1"></i>Refresh Assessment</button>
+  </form>
+</div>
+
+<!-- Audit Score -->
+<div class="row g-4 mb-4">
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm text-center p-4">
+      <div style="font-size:72px;font-weight:900;line-height:1;color:{{
+        '#16a34a' if report.audit_color == 'success' else
+        '#d97706' if report.audit_color == 'warning' else
+        '#ea580c' if report.audit_color == 'orange' else '#dc2626'
+      }};">{{ report.audit_score | int }}</div>
+      <div class="text-muted small">AUDIT READINESS SCORE</div>
+      <div class="badge mt-2 bg-{{ report.audit_color }}" style="font-size:13px;">{{ report.audit_status }}</div>
+    </div>
+  </div>
+  <div class="col-md-8">
+    <div class="row g-3 h-100">
+      <div class="col-6">
+        <div class="kpi-card h-100">
+          <div class="kpi-value text-danger">{{ report.critical_count }}</div>
+          <div class="kpi-label">🔴 Critical Issues</div>
+        </div>
+      </div>
+      <div class="col-6">
+        <div class="kpi-card h-100">
+          <div class="kpi-value text-warning">{{ report.high_count }}</div>
+          <div class="kpi-label">🟠 High Issues</div>
+        </div>
+      </div>
+      <div class="col-6">
+        <div class="kpi-card h-100">
+          <div class="kpi-value text-primary">{{ report.medium_count }}</div>
+          <div class="kpi-label">🟡 Medium Issues</div>
+        </div>
+      </div>
+      <div class="col-6">
+        <div class="kpi-card h-100">
+          <div class="kpi-value">{{ report.total_issues }}</div>
+          <div class="kpi-label">Total Open Issues</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Area-by-Area -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white py-3 border-bottom">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-clipboard2-check me-2"></i>AUDIT AREA REVIEW</h6>
+  </div>
+  <div class="table-responsive">
+    <table class="table mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Audit Area</th>
+          <th class="text-center">Status</th>
+          <th class="text-center">Issues</th>
+          <th class="text-center">Max Severity</th>
+          <th>Action Required</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for area in report.areas %}
+        <tr>
+          <td class="fw-semibold">{{ area.area }}</td>
+          <td class="text-center">
+            {% if area.status == 'Clear' %}
+            <span class="badge bg-success"><i class="bi bi-check me-1"></i>Clear</span>
+            {% else %}
+            <span class="badge bg-warning text-dark"><i class="bi bi-exclamation me-1"></i>Needs Work</span>
+            {% endif %}
+          </td>
+          <td class="text-center">{{ area.issue_count }}</td>
+          <td class="text-center">
+            {% if area.severity != 'none' %}
+            <span class="badge sev-badge-{{ area.severity }}">{{ area.severity | title }}</span>
+            {% else %}
+            <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td class="text-muted small">
+            {% if area.issue_count > 0 %}
+            <a href="/company/{{ company.realm_id }}/issues?category={{ area.area | lower | replace(' ', '_') }}">
+              View {{ area.issue_count }} issue(s) →
+            </a>
+            {% else %}
+            No action required
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Recommendations -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white py-3 border-bottom">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-lightbulb me-2 text-warning"></i>CONTROLLER RECOMMENDATIONS</h6>
+  </div>
+  <div class="card-body">
+    {% if report.critical_count > 0 %}
+    <div class="alert alert-danger">
+      <strong><i class="bi bi-exclamation-circle-fill me-2"></i>{{ report.critical_count }} Critical Issue(s) Must Be Resolved Before Audit</strong>
+      <p class="mb-0 small mt-1">Critical issues indicate material misstatements or data integrity problems that auditors will flag. Address these immediately.</p>
+      <a href="/company/{{ company.realm_id }}/issues?severity=critical" class="btn btn-sm btn-danger mt-2">Review Critical Issues</a>
+    </div>
+    {% endif %}
+
+    {% if report.high_count > 0 %}
+    <div class="alert alert-warning">
+      <strong><i class="bi bi-exclamation-triangle-fill me-2"></i>{{ report.high_count }} High Priority Issue(s) Should Be Resolved</strong>
+      <p class="mb-0 small mt-1">High-priority issues represent significant accounting concerns that auditors will scrutinize.</p>
+      <a href="/company/{{ company.realm_id }}/issues?severity=high" class="btn btn-sm btn-warning mt-2">Review High Issues</a>
+    </div>
+    {% endif %}
+
+    {% if report.total_issues == 0 %}
+    <div class="alert alert-success">
+      <strong><i class="bi bi-check-circle-fill me-2"></i>No Open Issues Found</strong>
+      <p class="mb-0 small mt-1">Run the accounting assessment to verify the books are clean before the audit.</p>
+    </div>
+    {% endif %}
+
+    <div class="mt-3">
+      <div class="fw-semibold mb-2">Audit Preparation Checklist:</div>
+      <ul class="small text-muted">
+        <li>Ensure all bank accounts are fully reconciled</li>
+        <li>Resolve all Opening Balance Equity balances</li>
+        <li>Clear all Uncategorized transactions</li>
+        <li>Verify AR and AP aging reports are accurate</li>
+        <li>Confirm all payroll liabilities are reconciled</li>
+        <li>Review all journal entries for proper authorization</li>
+        <li>Confirm month-end close completed for all audit periods</li>
+        <li>Gather all supporting documentation for significant transactions</li>
+      </ul>
+    </div>
+
+    {% if report.data_as_of %}
+    <div class="text-muted small mt-3">
+      <i class="bi bi-clock me-1"></i>Assessment data as of: {{ report.data_as_of[:19] }}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
