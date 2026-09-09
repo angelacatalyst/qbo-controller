@@ -46,7 +46,8 @@ app = FastAPI(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"), cache_size=0)
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+templates.env.cache = None  # Disable LRU cache to avoid unhashable type errors
 
 # In-memory OAuth state store (use Redis in production)
 _oauth_states: dict = {}
