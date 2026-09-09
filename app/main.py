@@ -114,8 +114,7 @@ def get_profile(db: Session, realm_id: str) -> Optional[CompanyProfile]:
 def home(request: Request, db: Session = Depends(get_db)):
     companies = db.query(Company).order_by(Company.company_name).all()
     portfolio = get_portfolio_summary(db, companies)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "portfolio": portfolio,
         "total_companies": len(companies),
         "connected": sum(1 for c in companies if c.connection_status == "connected"),
@@ -168,8 +167,7 @@ def company_workspace(realm_id: str, request: Request, db: Session = Depends(get
         "low": sum(1 for i in issues if i.severity == "low"),
     }
 
-    return templates.TemplateResponse("company.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "company.html", {
         "company": company,
         "profile": profile,
         "health": health,
@@ -192,8 +190,7 @@ def company_workspace(realm_id: str, request: Request, db: Session = Depends(get
 
 @app.get("/qbo/connect", response_class=HTMLResponse)
 def qbo_connect_form(request: Request):
-    return templates.TemplateResponse("connect.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "connect.html", {
         "app_name": settings.APP_NAME,
         "environment": settings.QBO_ENVIRONMENT,
         "has_credentials": bool(settings.QBO_CLIENT_ID and settings.QBO_CLIENT_SECRET),
@@ -399,8 +396,7 @@ def view_issues(
         AccountingIssue.created_at.desc()
     ).all()
 
-    return templates.TemplateResponse("issues.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "issues.html", {
         "company": company,
         "issues": issues,
         "filter_severity": severity,
@@ -445,8 +441,7 @@ def view_journal_entries(
         query = query.filter(ProposedJournalEntry.approval_status == status_filter)
     jes = query.order_by(ProposedJournalEntry.created_at.desc()).all()
 
-    return templates.TemplateResponse("journal_entries.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "journal_entries.html", {
         "company": company,
         "journal_entries": jes,
         "status_filter": status_filter,
@@ -631,8 +626,7 @@ def month_close_view(
         realm_id=realm_id
     ).order_by(MonthEndClose.period.desc()).limit(12).all()
 
-    return templates.TemplateResponse("month_close.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "month_close.html", {
         "company": company,
         "close": close,
         "period": period,
@@ -674,8 +668,7 @@ def audit_view(realm_id: str, request: Request, db: Session = Depends(get_db)):
     profile = get_profile(db, realm_id)
     report = generate_audit_readiness(db, company, profile)
 
-    return templates.TemplateResponse("audit.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "audit.html", {
         "company": company,
         "report": report,
         "app_name": settings.APP_NAME,
@@ -695,8 +688,7 @@ def reports_view(realm_id: str, request: Request, db: Session = Depends(get_db))
     ap = _parse_ap_aging(profile.ap_aging_data or {}) if profile else {}
     revenue = analyze_revenue(profile) if profile else {}
 
-    return templates.TemplateResponse("reports.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "reports.html", {
         "company": company,
         "profile": profile,
         "bs": bs,
@@ -737,8 +729,7 @@ def changelog_view(
 
     logs = query.order_by(ChangeLog.action_datetime.desc()).limit(200).all()
 
-    return templates.TemplateResponse("changelog.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "changelog.html", {
         "company": company,
         "logs": logs,
         "filter_action": action_type,
@@ -754,8 +745,7 @@ def changelog_view(
 def profile_view(realm_id: str, request: Request, db: Session = Depends(get_db)):
     company = get_company_or_404(db, realm_id)
     profile = get_profile(db, realm_id)
-    return templates.TemplateResponse("profile.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "profile.html", {
         "company": company,
         "profile": profile,
         "app_name": settings.APP_NAME,
