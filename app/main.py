@@ -93,9 +93,6 @@ templates.env.filters["fmt_date"] = fmt_date
 templates.env.filters["severity_badge"] = severity_badge
 templates.env.filters["tojson"] = lambda v, indent=None: _json.dumps(v, indent=indent, default=str)
 
-# Add enumerate as a global (Jinja2 does not expose Python's enumerate by default)
-templates.env.globals["enumerate"] = enumerate
-
 
 # ─── Helpers ──────────────────────────────────────────────────
 
