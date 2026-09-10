@@ -55,7 +55,13 @@ _oauth_states: dict = {}
 
 @app.on_event("startup")
 def startup():
-    init_db()
+    try:
+        init_db()
+        print("✓ Database initialized successfully")
+    except Exception as exc:
+        import traceback
+        print(f"⚠ Database init failed — app will start anyway: {exc}")
+        traceback.print_exc()
 
 
 # ─── Jinja2 Filters ───────────────────────────────────────────
