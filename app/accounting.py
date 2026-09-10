@@ -235,13 +235,50 @@ def _parse_ap_aging(ap_data: dict) -> dict:
 
 # ─── Health Score Engine ─────────────────────────────────────
 
+# "Not assessed" sentinel — returned any time real data is absent.
+# NEVER return score=100 / "Excellent" without actual assessment data.
+_NOT_ASSESSED = {
+    "score": None,
+    "label": "NOT YET ASSESSED",
+    "sublabel": "Sync QBO data, then run Assessment",
+    "color": "secondary",
+    "category_scores": {},
+    "assessed": False,
+    "computed_at": None,
+}
+
+
 def calculate_health_score(profile: CompanyProfile, issues: list) -> dict:
     """
     Compute 0–100 Accounting Health Score for one company.
-    Deduct points based on severity and category of issues.
+
+    *** MANDATORY DATA GATE ***
+    A numeric score is NEVER returned unless:
+      1. A CompanyProfile exists, AND
+      2. profile.data_as_of is set (meaning QBO data has actually been synced).
+
+    Without real data this function returns the _NOT_ASSESSED sentinel
+    (score=None, assessed=False).  The UI must display "NOT YET ASSESSED"
+    and never show 100 / Excellent for a company whose books have not been
+    inspected.
     """
-    scores = {k: v for k, v in HEALTH_WEIGHTS.items()}  # Start full
-    deductions = {}
+    # ── Gate 1: profile must exist ────────────────────────────
+    if profile is None:
+        return {**_NOT_ASSESSED, "reason": "No company profile found."}
+
+    # ── Gate 2: QBO data must have been synced ────────────────
+    if not profile.data_as_of:
+        return {
+            **_NOT_ASSESSED,
+            "reason": (
+                "QBO accounting data has not been synchronized. "
+                "Run a full sync first, then run Assessment."
+            ),
+        }
+
+    # ── Real score: deduct from 100 based on actual findings ──
+    scores = {k: v for k, v in HEALTH_WEIGHTS.items()}
+    deductions: dict = {}
 
     severity_deductions = {"critical": 8, "high": 4, "medium": 2, "low": 0.5}
 
@@ -274,33 +311,27 @@ def calculate_health_score(profile: CompanyProfile, issues: list) -> dict:
         if cat in scores:
             scores[cat] = max(0, scores[cat] - deduct)
 
-    # Auto-detect additional issues from profile data
-    if profile:
-        bs = _parse_balance_sheet(profile.balance_sheet_data or {})
-        pl = _parse_pl(profile.pl_data or {})
+    # Additional deductions derived directly from synced report data
+    bs = _parse_balance_sheet(profile.balance_sheet_data or {})
+    pl = _parse_pl(profile.pl_data or {})
 
-        # Penalize Opening Balance Equity
-        if abs(bs.get("opening_balance_equity", 0)) > 0.01:
-            scores["equity_review"] = max(0, scores["equity_review"] - 3)
+    if abs(bs.get("opening_balance_equity", 0)) > 0.01:
+        scores["equity_review"] = max(0, scores["equity_review"] - 3)
 
-        # Penalize uncategorized
-        if pl.get("uncategorized_income", 0) > 0 or pl.get("uncategorized_expense", 0) > 0:
-            scores["uncategorized_transactions"] = max(0, scores["uncategorized_transactions"] - 4)
+    if pl.get("uncategorized_income", 0) > 0 or pl.get("uncategorized_expense", 0) > 0:
+        scores["uncategorized_transactions"] = max(0, scores["uncategorized_transactions"] - 4)
 
-        # Penalize Undeposited Funds if high
-        if bs.get("undeposited_funds", 0) > 5000:
-            scores["bank_reconciliation"] = max(0, scores["bank_reconciliation"] - 3)
+    if bs.get("undeposited_funds", 0) > 5000:
+        scores["bank_reconciliation"] = max(0, scores["bank_reconciliation"] - 3)
 
-        # Check balance sheet equation: Assets = Liabilities + Equity
-        total_a = bs.get("total_assets", 0)
-        total_l = bs.get("total_liabilities", 0)
-        total_e = bs.get("total_equity", 0)
-        if total_a and abs(total_a - (total_l + total_e)) > 1:
-            scores["balance_sheet_integrity"] = max(0, scores["balance_sheet_integrity"] - 10)
+    total_a = bs.get("total_assets", 0)
+    total_l = bs.get("total_liabilities", 0)
+    total_e = bs.get("total_equity", 0)
+    if total_a and abs(total_a - (total_l + total_e)) > 1:
+        scores["balance_sheet_integrity"] = max(0, scores["balance_sheet_integrity"] - 10)
 
     total = round(sum(scores.values()), 1)
 
-    # Determine label
     label, color = "Unknown", "secondary"
     for (lo, hi), (lbl, clr) in HEALTH_LABELS.items():
         if lo <= total <= hi:
@@ -310,8 +341,10 @@ def calculate_health_score(profile: CompanyProfile, issues: list) -> dict:
     return {
         "score": total,
         "label": label,
+        "sublabel": f"Based on {len(issues)} open issue(s)",
         "color": color,
         "category_scores": scores,
+        "assessed": True,
         "computed_at": _now().isoformat(),
     }
 
@@ -678,7 +711,34 @@ def update_close_step(db: Session, close: MonthEndClose, step_num: int,
 # ─── Audit Readiness Report ───────────────────────────────────
 
 def generate_audit_readiness(db: Session, company: Company, profile: CompanyProfile) -> dict:
-    """Generate a comprehensive audit readiness assessment."""
+    """
+    Generate audit readiness assessment.
+
+    *** DATA GATE ***
+    Returns "NOT YET ASSESSED" when QBO data has not been synced.
+    A score of 100 / "Ready" is never displayed without real assessment data.
+    """
+    # Gate: no score without synced data
+    if profile is None or not profile.data_as_of:
+        return {
+            "audit_score": None,
+            "audit_status": "NOT YET ASSESSED",
+            "audit_color": "secondary",
+            "assessed": False,
+            "reason": (
+                "QBO accounting data has not been synchronized. "
+                "Run a full sync and then an Assessment before evaluating audit readiness."
+            ),
+            "total_issues": 0,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "areas": [],
+            "data_as_of": None,
+            "company_name": company.company_name,
+            "realm_id": company.realm_id,
+        }
+
     issues = db.query(AccountingIssue).filter_by(
         realm_id=company.realm_id, status="open"
     ).all()
@@ -687,7 +747,7 @@ def generate_audit_readiness(db: Session, company: Company, profile: CompanyProf
     high = [i for i in issues if i.severity == "high"]
     medium = [i for i in issues if i.severity == "medium"]
 
-    # Score audit readiness
+    # Score audit readiness — only from real assessment findings
     deductions = len(critical) * 15 + len(high) * 8 + len(medium) * 3
     audit_score = max(0, 100 - deductions)
 
@@ -733,6 +793,7 @@ def generate_audit_readiness(db: Session, company: Company, profile: CompanyProf
         "audit_score": audit_score,
         "audit_status": audit_status,
         "audit_color": audit_color,
+        "assessed": True,
         "total_issues": len(issues),
         "critical_count": len(critical),
         "high_count": len(high),
@@ -759,8 +820,18 @@ def get_portfolio_summary(db: Session, companies: list) -> list:
         critical = sum(1 for i in issues if i.severity == "critical")
         high = sum(1 for i in issues if i.severity == "high")
 
-        health = profile.health_score if profile and profile.health_score else 0
-        health_label, health_color = get_health_label(health)
+        # Determine assessed state: requires both a sync AND a completed assessment
+        data_synced = bool(profile and profile.data_as_of)
+        assessment_ran = bool(profile and profile.health_score_updated)
+        assessed = data_synced and assessment_ran
+
+        if assessed:
+            health = profile.health_score  # may be 0 legitimately
+            health_label, health_color = get_health_label(health if health is not None else 0)
+        else:
+            health = None
+            health_label = "NOT YET ASSESSED"
+            health_color = "secondary"
 
         month_closes = db.query(MonthEndClose).filter_by(
             realm_id=company.realm_id
@@ -775,6 +846,7 @@ def get_portfolio_summary(db: Session, companies: list) -> list:
             "health_score": health,
             "health_label": health_label,
             "health_color": health_color,
+            "assessed": assessed,
             "open_issues": open_issues,
             "critical_issues": critical,
             "high_issues": high,
