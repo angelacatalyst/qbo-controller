@@ -49,9 +49,18 @@
   </div>
   <div class="col-md-3">
     <div class="kpi-card">
-      {% set avg_score = (portfolio | sum(attribute='health_score') / portfolio | length) | round(0) if portfolio else 0 %}
-      <div class="kpi-value {% if avg_score >= 80 %}text-success{% elif avg_score >= 70 %}text-warning{% else %}text-danger{% endif %}">{{ avg_score }}</div>
-      <div class="kpi-label"><i class="bi bi-heart-pulse me-1"></i> Avg Health Score</div>
+      {% set assessed_cos = portfolio | selectattr('assessed') | list %}
+      {% if assessed_cos %}
+        {% set avg_score = (assessed_cos | sum(attribute='health_score') / assessed_cos | length) | round(0) %}
+        <div class="kpi-value {% if avg_score >= 80 %}text-success{% elif avg_score >= 70 %}text-warning{% else %}text-danger{% endif %}">{{ avg_score }}</div>
+      {% else %}
+        <div class="kpi-value text-muted">—</div>
+      {% endif %}
+      <div class="kpi-label"><i class="bi bi-heart-pulse me-1"></i> Avg Health Score
+        {% if assessed_cos and assessed_cos | length < portfolio | length %}
+          <span class="text-muted" style="font-size:10px;">({{ assessed_cos | length }} assessed)</span>
+        {% endif %}
+      </div>
     </div>
   </div>
 </div>
@@ -84,12 +93,16 @@
           <div style="position:relative;width:60px;height:60px;flex-shrink:0;">
             <canvas id="gauge-{{ loop.index }}" width="60" height="60"></canvas>
             <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">
-              <div style="font-size:16px;font-weight:800;line-height:1;color:{{
-                '#16a34a' if co.health_color == 'success' else
-                '#2563eb' if co.health_color == 'primary' else
-                '#d97706' if co.health_color == 'warning' else
-                '#ea580c' if co.health_color == 'orange' else '#dc2626'
-              }};">{{ co.health_score | int }}</div>
+              {% if co.assessed %}
+                <div style="font-size:16px;font-weight:800;line-height:1;color:{{
+                  '#16a34a' if co.health_color == 'success' else
+                  '#2563eb' if co.health_color == 'primary' else
+                  '#d97706' if co.health_color == 'warning' else
+                  '#ea580c' if co.health_color == 'orange' else '#dc2626'
+                }};">{{ co.health_score | int }}</div>
+              {% else %}
+                <div style="font-size:18px;font-weight:800;line-height:1;color:#9ca3af;">—</div>
+              {% endif %}
             </div>
           </div>
           <div>
@@ -161,7 +174,11 @@
           </td>
           <td class="small text-muted">{{ co.last_sync }}</td>
           <td class="text-center">
-            <span class="badge bg-{{ co.health_color }}" style="font-size:12px;">{{ co.health_score | int }}</span>
+            {% if co.assessed %}
+              <span class="badge bg-{{ co.health_color }}" style="font-size:12px;">{{ co.health_score | int }}</span>
+            {% else %}
+              <span class="badge bg-secondary" style="font-size:12px;">—</span>
+            {% endif %}
             <div class="small text-muted" style="font-size:10px;">{{ co.health_label }}</div>
           </td>
           <td class="text-center fw-semibold">{{ co.open_issues }}</td>
@@ -191,15 +208,20 @@
   const canvas = document.getElementById('gauge-{{ loop.index }}');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const score = {{ co.health_score | int }};
-  const color = '{{ "#16a34a" if co.health_color == "success" else "#2563eb" if co.health_color == "primary" else "#d97706" if co.health_color == "warning" else "#ea580c" if co.health_color == "orange" else "#dc2626" }}';
-  const angle = (score / 100) * 2 * Math.PI;
+  const assessed = {{ 'true' if co.assessed else 'false' }};
   const cx = 30, cy = 30, r = 24;
   ctx.clearRect(0, 0, 60, 60);
+  // Background ring
   ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI);
   ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 6; ctx.stroke();
-  ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + angle);
-  ctx.strokeStyle = color; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke();
+  if (assessed) {
+    const score = {{ co.health_score | int if co.assessed else 0 }};
+    const color = '{{ "#16a34a" if co.health_color == "success" else "#2563eb" if co.health_color == "primary" else "#d97706" if co.health_color == "warning" else "#ea580c" if co.health_color == "orange" else "#dc2626" }}';
+    const angle = (score / 100) * 2 * Math.PI;
+    ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + angle);
+    ctx.strokeStyle = color; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke();
+  }
+  // If not assessed: just the grey ring remains — no fill, score marker, or false progress arc
 })();
 {% endfor %}
 </script>
