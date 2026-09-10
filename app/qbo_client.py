@@ -398,8 +398,19 @@ def sync_company_data(db: Session, company: Company, sync_type: str = "full") ->
             company.qbo_country = ci.get("Country", "US")
             fys = ci.get("FiscalYearStartMonth")
             if fys:
-                company.qbo_fiscal_year_start_month = fys
-                profile.fiscal_year_start_month = fys
+                # QBO returns month as a name ("January") or integer — normalize to int
+                _month_map = {
+                    "January": 1, "February": 2, "March": 3, "April": 4,
+                    "May": 5, "June": 6, "July": 7, "August": 8,
+                    "September": 9, "October": 10, "November": 11, "December": 12,
+                }
+                fys_int = _month_map.get(fys, fys) if isinstance(fys, str) else fys
+                try:
+                    fys_int = int(fys_int)
+                except (ValueError, TypeError):
+                    fys_int = 1  # default to January if unparseable
+                company.qbo_fiscal_year_start_month = fys_int
+                profile.fiscal_year_start_month = fys_int
             endpoints_done.append("company_info")
         except Exception as e:
             errors.append({"endpoint": "company_info", "error": str(e)})
@@ -499,12 +510,20 @@ def sync_company_data(db: Session, company: Company, sync_type: str = "full") ->
         db.commit()
 
     except Exception as e:
+        # Must rollback the failed transaction before we can write anything new
+        try:
+            db.rollback()
+        except Exception:
+            pass
         sync.status = "failed"
         sync.errors = [{"fatal": str(e)}]
         sync.completed_at = _now()
         company.last_sync = _now()
         company.last_sync_status = "failed"
         company.last_sync_error = str(e)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            pass  # Best-effort — don't let logging failure mask the real error
 
     return sync
