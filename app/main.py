@@ -141,13 +141,10 @@ def company_workspace(realm_id: str, request: Request, db: Session = Depends(get
     ).order_by(AccountingIssue.created_at.desc()).all()
 
     health = calculate_health_score(profile, issues) if profile else {
-        "score": 0, "label": "No Data", "color": "secondary", "category_scores": {}
+        "score": None, "label": "NOT YET ASSESSED", "sublabel": "Sync QBO data, then run Assessment",
+        "color": "secondary", "category_scores": {}, "assessed": False,
     }
-    if profile:
-        profile.health_score = health["score"]
-        profile.health_score_updated = _now()
-        profile.health_details = health
-        db.commit()
+    # NEVER auto-save health score on page load — only save when assessment explicitly runs
 
     pending_jes = db.query(ProposedJournalEntry).filter_by(
         realm_id=realm_id, approval_status="pending"
@@ -835,15 +832,18 @@ def company_summary_api(realm_id: str, db: Session = Depends(get_db)):
     company = get_company_or_404(db, realm_id)
     profile = get_profile(db, realm_id)
     issues = db.query(AccountingIssue).filter_by(realm_id=realm_id, status="open").all()
-    health = calculate_health_score(profile, issues) if profile else {}
+    health = calculate_health_score(profile, issues) if profile else {
+        "score": None, "label": "NOT YET ASSESSED", "assessed": False
+    }
 
     return {
         "company_name": company.company_name,
         "realm_id": company.realm_id,
         "connection_status": company.connection_status,
         "last_sync": company.last_sync.isoformat() if company.last_sync else None,
-        "health_score": health.get("score"),
+        "health_score": health.get("score"),           # None when not assessed
         "health_label": health.get("label"),
+        "assessed": health.get("assessed", False),
         "open_issues": len(issues),
         "critical_issues": sum(1 for i in issues if i.severity == "critical"),
     }
