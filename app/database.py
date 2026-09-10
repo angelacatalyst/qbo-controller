@@ -5,6 +5,8 @@ ONE COMPANY = ONE ISOLATED ACCOUNTING WORKSPACE.
 import uuid
 from datetime import datetime
 
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey,
     Integer, String, Text, create_engine, event
@@ -330,20 +332,49 @@ class MonthEndClose(Base):
 
 
 # ── Database Setup ────────────────────────────────────────────
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
-    echo=settings.DEBUG,
-)
 
-# Enable WAL mode for better SQLite concurrency
-if "sqlite" in settings.DATABASE_URL:
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_conn, _):
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+def _build_engine():
+    """Build a SQLAlchemy engine appropriate for the configured database."""
+    url = settings.DATABASE_URL
+
+    if "sqlite" in url:
+        eng = create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            echo=settings.DEBUG,
+        )
+
+        @event.listens_for(eng, "connect")
+        def set_sqlite_pragma(dbapi_conn, _):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        return eng
+
+    # PostgreSQL / Neon serverless ─────────────────────────────
+    # 1. Strip channel_binding=require — Neon's PgBouncer pooler does not
+    #    support SCRAM-SHA-256-PLUS channel binding and the negotiation hangs.
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params.pop("channel_binding", None)
+    new_query = urlencode({k: v[0] for k, v in params.items()})
+    clean_url = urlunparse(parsed._replace(query=new_query))
+
+    # 2. Use NullPool so connections are never held open between requests
+    #    (required for serverless / connection-pooled Neon endpoints).
+    from sqlalchemy.pool import NullPool
+
+    return create_engine(
+        clean_url,
+        poolclass=NullPool,
+        connect_args={"connect_timeout": 30},  # 30-second TCP timeout
+        echo=settings.DEBUG,
+    )
+
+
+engine = _build_engine()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
