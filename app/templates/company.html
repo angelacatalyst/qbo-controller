@@ -24,12 +24,16 @@
       <div class="col-auto">
         <!-- Health Score -->
         <div class="text-center">
-          <div style="font-size:48px;font-weight:900;line-height:1;color:{{
-            '#4ade80' if health.color == 'success' else
-            '#60a5fa' if health.color == 'primary' else
-            '#fbbf24' if health.color == 'warning' else
-            '#fb923c' if health.color == 'orange' else '#f87171'
-          }};">{{ health.score | int }}</div>
+          {% if health.assessed %}
+            <div style="font-size:48px;font-weight:900;line-height:1;color:{{
+              '#4ade80' if health.color == 'success' else
+              '#60a5fa' if health.color == 'primary' else
+              '#fbbf24' if health.color == 'warning' else
+              '#fb923c' if health.color == 'orange' else '#f87171'
+            }};">{{ health.score | int }}</div>
+          {% else %}
+            <div style="font-size:48px;font-weight:900;line-height:1;color:#94a3b8;">—</div>
+          {% endif %}
           <div style="font-size:12px;color:#94a3b8;">HEALTH SCORE</div>
           <div class="badge mt-1" style="background:rgba(255,255,255,.1);font-size:11px;">{{ health.label }}</div>
         </div>
@@ -222,7 +226,7 @@
     </div>
 
     <!-- Accounting Health Breakdown -->
-    {% if health.category_scores %}
+    {% if health.assessed and health.category_scores %}
     <div class="card border-0 shadow-sm mb-4">
       <div class="card-header bg-white py-3 border-bottom">
         <h6 class="mb-0 fw-bold"><i class="bi bi-heart-pulse-fill me-2 text-danger"></i>ACCOUNTING HEALTH BREAKDOWN</h6>
