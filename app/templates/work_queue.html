@@ -1,0 +1,382 @@
+{% extends "base.html" %}
+{% block title %}AI Work Queue — {{ company.company_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+  {# Header #}
+  <div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+      <nav aria-label="breadcrumb">
+        <ol class="breadcrumb mb-1" style="font-size:.85rem;">
+          <li class="breadcrumb-item"><a href="/clients" class="text-decoration-none">Clients</a></li>
+          <li class="breadcrumb-item"><a href="/company/{{ company.realm_id }}" class="text-decoration-none">{{ company.company_name }}</a></li>
+          <li class="breadcrumb-item active">AI Work Queue</li>
+        </ol>
+      </nav>
+      <h2 class="fw-bold mb-0" style="color:#1a1a2e;">
+        <i class="bi bi-robot me-2" style="color:#6366f1;"></i>AI Work Queue
+      </h2>
+      <p class="text-muted mb-0 mt-1">{{ company.company_name }} · Items awaiting your review</p>
+    </div>
+    <div class="d-flex gap-2">
+      <a href="/company/{{ company.realm_id }}/bookkeeping/run" class="btn btn-outline-primary">
+        <i class="bi bi-play-fill me-1"></i>Run Engine
+      </a>
+      <a href="/company/{{ company.realm_id }}/bookkeeping" class="btn btn-primary">
+        <i class="bi bi-grid-3x3-gap me-1"></i>Categorization
+      </a>
+    </div>
+  </div>
+
+  {# Autonomy summary cards #}
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm p-3 text-center h-100" style="border-left:4px solid #10b981 !important;">
+        <div class="fs-2 fw-bold text-success">{{ counts.auto }}</div>
+        <div class="small fw-semibold text-success">AUTO</div>
+        <div class="text-muted" style="font-size:.75rem;">Ready to execute</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm p-3 text-center h-100" style="border-left:4px solid #3b82f6 !important;">
+        <div class="fs-2 fw-bold text-primary">{{ counts.batch }}</div>
+        <div class="small fw-semibold text-primary">BATCH</div>
+        <div class="text-muted" style="font-size:.75rem;">Review then approve all</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm p-3 text-center h-100" style="border-left:4px solid #f59e0b !important;">
+        <div class="fs-2 fw-bold text-warning">{{ counts.individual }}</div>
+        <div class="small fw-semibold text-warning">INDIVIDUAL</div>
+        <div class="text-muted" style="font-size:.75rem;">One at a time</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm p-3 text-center h-100" style="border-left:4px solid #ef4444 !important;">
+        <div class="fs-2 fw-bold text-danger">{{ counts.human }}</div>
+        <div class="small fw-semibold text-danger">HUMAN REQUIRED</div>
+        <div class="text-muted" style="font-size:.75rem;">Needs your judgment</div>
+      </div>
+    </div>
+  </div>
+
+  {# Write guard banner #}
+  <div class="alert alert-info d-flex align-items-center gap-2 mb-4 py-2" style="border:1px solid #bfdbfe;background:#eff6ff;">
+    <i class="bi bi-shield-lock-fill" style="color:#3b82f6;"></i>
+    <div class="small">
+      <strong>Write Guard Active.</strong>
+      Items below are read-only proposals. No changes are made to QBO until you approve and execute each item individually.
+    </div>
+  </div>
+
+  {# Tabs #}
+  <ul class="nav nav-tabs mb-0" id="wqTabs" role="tablist" style="border-bottom:2px solid #e5e7eb;">
+    <li class="nav-item">
+      <button class="nav-link active fw-semibold" data-bs-toggle="tab" data-bs-target="#tab-human" type="button">
+        <i class="bi bi-person-fill me-1 text-danger"></i>Human Required
+        {% if counts.human > 0 %}<span class="badge bg-danger ms-1">{{ counts.human }}</span>{% endif %}
+      </button>
+    </li>
+    <li class="nav-item">
+      <button class="nav-link fw-semibold" data-bs-toggle="tab" data-bs-target="#tab-individual" type="button">
+        <i class="bi bi-person-check me-1 text-warning"></i>Individual
+        {% if counts.individual > 0 %}<span class="badge bg-warning text-dark ms-1">{{ counts.individual }}</span>{% endif %}
+      </button>
+    </li>
+    <li class="nav-item">
+      <button class="nav-link fw-semibold" data-bs-toggle="tab" data-bs-target="#tab-batch" type="button">
+        <i class="bi bi-collection me-1 text-primary"></i>Batch
+        {% if counts.batch > 0 %}<span class="badge bg-primary ms-1">{{ counts.batch }}</span>{% endif %}
+      </button>
+    </li>
+    <li class="nav-item">
+      <button class="nav-link fw-semibold" data-bs-toggle="tab" data-bs-target="#tab-auto" type="button">
+        <i class="bi bi-lightning-fill me-1 text-success"></i>Auto
+        {% if counts.auto > 0 %}<span class="badge bg-success ms-1">{{ counts.auto }}</span>{% endif %}
+      </button>
+    </li>
+  </ul>
+
+  <div class="tab-content" id="wqTabContent">
+
+    {# ── HUMAN REQUIRED ── #}
+    <div class="tab-pane fade show active" id="tab-human" role="tabpanel">
+      {% set items = items_by_level[3] %}
+      {% if items %}
+      <div class="card border-0 shadow-sm mt-0" style="border-top:none !important;border-radius:0 0 .5rem .5rem;">
+        <div class="p-3 border-bottom" style="background:#fff5f5;">
+          <p class="mb-0 small text-danger fw-semibold">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            These items require your direct attention — AI confidence is insufficient or risk is too high to suggest automation.
+          </p>
+        </div>
+        {% include "partials/work_item_table.html" ignore missing %}
+        {% for wi in items %}
+        {% include "partials/work_item_row.html" ignore missing %}
+        {% if not self %}
+          {{ _render_work_item_row(wi) }}
+        {% endif %}
+        {% endfor %}
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead style="background:#fafafa;">
+              <tr>
+                <th class="px-4 py-2 text-muted small">TXN</th>
+                <th class="px-3 py-2 text-muted small">DATE</th>
+                <th class="px-3 py-2 text-muted small">PAYEE / MEMO</th>
+                <th class="px-3 py-2 text-muted small text-end">AMOUNT</th>
+                <th class="px-3 py-2 text-muted small">CURRENT ACCT</th>
+                <th class="px-3 py-2 text-muted small">SUGGESTED</th>
+                <th class="px-3 py-2 text-muted small">CONFIDENCE</th>
+                <th class="px-4 py-2 text-muted small text-end">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for wi in items %}
+              <tr>
+                <td class="px-4 py-2">
+                  <span class="badge rounded-pill" style="font-size:.72rem;
+                    {% if wi.qbo_txn_type == 'Purchase' %}background:#ede9fe;color:#5b21b6;
+                    {% elif wi.qbo_txn_type == 'Check' %}background:#f3e8ff;color:#6b21a8;
+                    {% elif wi.qbo_txn_type == 'Deposit' %}background:#d1fae5;color:#065f46;
+                    {% else %}background:#fef3c7;color:#92400e;{% endif %}">
+                    {{ wi.qbo_txn_type or 'TXN' }}
+                  </span>
+                </td>
+                <td class="px-3 py-2 text-muted" style="font-size:.85rem;">{{ wi.txn_date | fmt_date if wi.txn_date else '—' }}</td>
+                <td class="px-3 py-2">
+                  <div class="fw-semibold" style="font-size:.88rem;color:#1a1a2e;">{{ wi.payee_name or '—' }}</div>
+                  {% if wi.memo %}<div class="text-muted" style="font-size:.78rem;">{{ wi.memo[:60] }}{% if wi.memo|length > 60 %}…{% endif %}</div>{% endif %}
+                </td>
+                <td class="px-3 py-2 text-end fw-semibold">
+                  <span class="{% if wi.amount and wi.amount < 0 %}text-danger{% else %}text-dark{% endif %}">
+                    {{ wi.amount | currency }}
+                  </span>
+                </td>
+                <td class="px-3 py-2 text-muted" style="font-size:.83rem;">{{ wi.current_account_name or '—' }}</td>
+                <td class="px-3 py-2">
+                  {% if wi.proposed_account_name %}
+                  <span style="font-size:.83rem;color:#4338ca;font-weight:500;">{{ wi.proposed_account_name }}</span>
+                  {% else %}
+                  <span class="text-muted">No suggestion</span>
+                  {% endif %}
+                </td>
+                <td class="px-3 py-2">
+                  {% if wi.confidence == 'high' %}
+                  <span class="badge" style="background:#d1fae5;color:#065f46;">High</span>
+                  {% elif wi.confidence == 'medium' %}
+                  <span class="badge" style="background:#fef3c7;color:#92400e;">Medium</span>
+                  {% elif wi.confidence == 'low' %}
+                  <span class="badge" style="background:#fee2e2;color:#991b1b;">Low</span>
+                  {% else %}
+                  <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+                <td class="px-4 py-2 text-end">
+                  {% if wi.status == 'pending' and wi.proposed_account_name %}
+                  <a href="/company/{{ company.realm_id }}/bookkeeping" class="btn btn-sm btn-outline-primary">
+                    Review
+                  </a>
+                  {% else %}
+                  <span class="badge bg-secondary">{{ wi.status }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-5 text-muted">
+        <i class="bi bi-check-circle-fill text-success" style="font-size:2rem;"></i>
+        <p class="mt-2">No items requiring human review.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    {# ── INDIVIDUAL ── #}
+    <div class="tab-pane fade" id="tab-individual" role="tabpanel">
+      {% set items = items_by_level[2] %}
+      {% if items %}
+      <div class="card border-0 shadow-sm mt-0" style="border-radius:0 0 .5rem .5rem;">
+        <div class="p-3 border-bottom" style="background:#fffbeb;">
+          <p class="mb-0 small text-warning fw-semibold">
+            <i class="bi bi-info-circle-fill me-1"></i>
+            High-confidence suggestions on transactions above the materiality threshold. Review and approve one by one.
+          </p>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead style="background:#fafafa;">
+              <tr>
+                <th class="px-4 py-2 text-muted small">TXN</th>
+                <th class="px-3 py-2 text-muted small">DATE</th>
+                <th class="px-3 py-2 text-muted small">PAYEE / MEMO</th>
+                <th class="px-3 py-2 text-muted small text-end">AMOUNT</th>
+                <th class="px-3 py-2 text-muted small">CURRENT → SUGGESTED</th>
+                <th class="px-4 py-2 text-muted small text-end">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for wi in items %}
+              <tr>
+                <td class="px-4 py-2">
+                  <span class="badge rounded-pill" style="font-size:.72rem;
+                    {% if wi.qbo_txn_type == 'Purchase' %}background:#ede9fe;color:#5b21b6;
+                    {% elif wi.qbo_txn_type == 'Check' %}background:#f3e8ff;color:#6b21a8;
+                    {% elif wi.qbo_txn_type == 'Deposit' %}background:#d1fae5;color:#065f46;
+                    {% else %}background:#fef3c7;color:#92400e;{% endif %}">
+                    {{ wi.qbo_txn_type or 'TXN' }}
+                  </span>
+                </td>
+                <td class="px-3 py-2 text-muted" style="font-size:.85rem;">{{ wi.txn_date | fmt_date if wi.txn_date else '—' }}</td>
+                <td class="px-3 py-2">
+                  <div class="fw-semibold" style="font-size:.88rem;">{{ wi.payee_name or '—' }}</div>
+                  {% if wi.memo %}<div class="text-muted" style="font-size:.78rem;">{{ wi.memo[:50] }}…</div>{% endif %}
+                </td>
+                <td class="px-3 py-2 text-end fw-semibold">{{ wi.amount | currency }}</td>
+                <td class="px-3 py-2" style="font-size:.83rem;">
+                  <span class="text-muted">{{ wi.current_account_name or '?' }}</span>
+                  <i class="bi bi-arrow-right mx-1 text-muted"></i>
+                  <span style="color:#4338ca;font-weight:500;">{{ wi.proposed_account_name or '?' }}</span>
+                </td>
+                <td class="px-4 py-2 text-end">
+                  <a href="/company/{{ company.realm_id }}/bookkeeping" class="btn btn-sm btn-warning text-dark">
+                    Review
+                  </a>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-5 text-muted">
+        <i class="bi bi-check-circle-fill text-success" style="font-size:2rem;"></i>
+        <p class="mt-2">No individual review items.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    {# ── BATCH ── #}
+    <div class="tab-pane fade" id="tab-batch" role="tabpanel">
+      {% set items = items_by_level[1] %}
+      {% if items %}
+      <div class="card border-0 shadow-sm mt-0" style="border-radius:0 0 .5rem .5rem;">
+        <div class="p-3 border-bottom d-flex justify-content-between align-items-center" style="background:#eff6ff;">
+          <p class="mb-0 small text-primary fw-semibold">
+            <i class="bi bi-collection-fill me-1"></i>
+            High-confidence suggestions ready for batch review. Approve all at once after reviewing.
+          </p>
+          <a href="/company/{{ company.realm_id }}/bookkeeping" class="btn btn-sm btn-primary">
+            Review All in Categorization
+          </a>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead style="background:#fafafa;">
+              <tr>
+                <th class="px-4 py-2 text-muted small">TXN</th>
+                <th class="px-3 py-2 text-muted small">DATE</th>
+                <th class="px-3 py-2 text-muted small">PAYEE</th>
+                <th class="px-3 py-2 text-muted small text-end">AMOUNT</th>
+                <th class="px-3 py-2 text-muted small">SUGGESTED ACCOUNT</th>
+                <th class="px-3 py-2 text-muted small text-center">CONFIDENCE</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for wi in items %}
+              <tr>
+                <td class="px-4 py-2">
+                  <span class="badge rounded-pill" style="font-size:.72rem;background:#ede9fe;color:#5b21b6;">
+                    {{ wi.qbo_txn_type or 'TXN' }}
+                  </span>
+                </td>
+                <td class="px-3 py-2 text-muted" style="font-size:.85rem;">{{ wi.txn_date | fmt_date if wi.txn_date else '—' }}</td>
+                <td class="px-3 py-2 fw-semibold" style="font-size:.88rem;">{{ wi.payee_name or '—' }}</td>
+                <td class="px-3 py-2 text-end fw-semibold">{{ wi.amount | currency }}</td>
+                <td class="px-3 py-2" style="color:#4338ca;font-size:.85rem;font-weight:500;">{{ wi.proposed_account_name or '—' }}</td>
+                <td class="px-3 py-2 text-center">
+                  <span class="badge" style="background:#d1fae5;color:#065f46;">High</span>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-5 text-muted">
+        <i class="bi bi-check-circle-fill text-success" style="font-size:2rem;"></i>
+        <p class="mt-2">No batch items pending.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    {# ── AUTO ── #}
+    <div class="tab-pane fade" id="tab-auto" role="tabpanel">
+      {% set items = items_by_level[0] %}
+      {% if items %}
+      <div class="card border-0 shadow-sm mt-0" style="border-radius:0 0 .5rem .5rem;">
+        <div class="p-3 border-bottom" style="background:#f0fdf4;">
+          <p class="mb-0 small text-success fw-semibold">
+            <i class="bi bi-lightning-fill me-1"></i>
+            Phase 1: Auto-execution is gated. These would normally run automatically — approve in Categorization when ready.
+          </p>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead style="background:#fafafa;">
+              <tr>
+                <th class="px-4 py-2 text-muted small">TXN</th>
+                <th class="px-3 py-2 text-muted small">PAYEE</th>
+                <th class="px-3 py-2 text-muted small text-end">AMOUNT</th>
+                <th class="px-3 py-2 text-muted small">SUGGESTED ACCOUNT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for wi in items %}
+              <tr>
+                <td class="px-4 py-2">
+                  <span class="badge rounded-pill" style="font-size:.72rem;background:#d1fae5;color:#065f46;">
+                    {{ wi.qbo_txn_type or 'TXN' }}
+                  </span>
+                </td>
+                <td class="px-3 py-2 fw-semibold" style="font-size:.88rem;">{{ wi.payee_name or '—' }}</td>
+                <td class="px-3 py-2 text-end fw-semibold">{{ wi.amount | currency }}</td>
+                <td class="px-3 py-2" style="color:#059669;font-size:.85rem;font-weight:500;">{{ wi.proposed_account_name or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-5 text-muted">
+        <i class="bi bi-lightning-fill text-success" style="font-size:2rem;"></i>
+        <p class="mt-2">No auto items queued.</p>
+      </div>
+      {% endif %}
+    </div>
+
+  </div>{# /tab-content #}
+
+  {# Work type breakdown #}
+  {% if work_type_counts %}
+  <div class="mt-4">
+    <h6 class="text-muted fw-semibold mb-3" style="font-size:.8rem;letter-spacing:.08em;">WORK TYPES IN QUEUE</h6>
+    <div class="d-flex flex-wrap gap-2">
+      {% for wtype, cnt in work_type_counts.items() %}
+      <span class="badge rounded-pill py-2 px-3" style="background:#ede9fe;color:#5b21b6;font-size:.8rem;">
+        {{ wtype }} · {{ cnt }}
+      </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
