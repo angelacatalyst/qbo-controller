@@ -199,6 +199,22 @@
   <a href="/company/{{ company.realm_id }}/changelog" class="nav-link {% if '/changelog' in request.url.path %}active{% endif %}">
     <i class="bi bi-clock-history"></i> Change Log
   </a>
+  <div class="nav-section" style="margin-top:8px;">BOOKKEEPING</div>
+  <a href="/company/{{ company.realm_id }}/bookkeeping" class="nav-link {% if '/bookkeeping' in request.url.path %}active{% endif %}">
+    <i class="bi bi-tags-fill"></i> Categorization
+  </a>
+  <a href="/company/{{ company.realm_id }}/ar-matching" class="nav-link {% if '/ar-matching' in request.url.path %}active{% endif %}">
+    <i class="bi bi-arrow-left-right"></i> AR Matching
+  </a>
+  <a href="/company/{{ company.realm_id }}/bank-rec" class="nav-link {% if '/bank-rec' in request.url.path %}active{% endif %}">
+    <i class="bi bi-bank2"></i> Bank Reconciliation
+  </a>
+  {% if company.company_type == 'restaurant' %}
+  <div class="nav-section" style="margin-top:8px;">RESTAURANT</div>
+  <a href="/company/{{ company.realm_id }}/restaurant" class="nav-link {% if '/restaurant' in request.url.path %}active{% endif %}">
+    <i class="bi bi-shop"></i> Daily Sales & JEs
+  </a>
+  {% endif %}
   <div class="nav-section" style="margin-top:8px;">NAVIGATION</div>
   <a href="/" class="nav-link"><i class="bi bi-arrow-left-circle"></i> All Companies</a>
   {% endif %}
