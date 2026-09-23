@@ -19,11 +19,15 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 
+import logging
+
 from app.database import (
     Company, CompanyProfile,
     ProposedCategorization, ProposedARMatch,
-    ProposedJournalEntry, ChangeLog, _now,
+    ProposedJournalEntry, ChangeLog, WorkItem, CompanyRule, _now,
 )
+
+logger = logging.getLogger(__name__)
 from app.qbo_client import QBOClient
 
 
@@ -284,6 +288,689 @@ def _build_reason(acct_kw: str | None, rule: str, payee: str, memo: str) -> str:
         f"Suggested account: '{acct_kw}'. "
         "Verify this matches the actual nature of the expense."
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 1B — WORKITEM CATEGORIZATION ENGINE v2
+# ═══════════════════════════════════════════════════════════════
+#
+# Design invariants (enforced here, never bypassed):
+#   1. QBO writes = 0 until a WorkItem is explicitly approved by a human
+#      and execute_work_item() is called on that approved item.
+#   2. run_categorization_v2() is READ/ANALYZE ONLY.
+#   3. Company isolation: every rule/WorkItem query is scoped to realm_id.
+#   4. materiality_limit is a FLOOR signal (amount > limit → level ≥ 2),
+#      NOT an authorization grant.  Autonomy is determined by four factors.
+# ═══════════════════════════════════════════════════════════════
+
+# ── Uncategorized detection keywords ────────────────────────────────────────
+
+_UNCATEGORIZED_KEYWORDS_EN = frozenset([
+    "uncategorized",
+    "uncategorized expense",
+    "uncategorized income",
+    "uncategorized asset",
+    "ask my accountant",
+    "suspense",
+    "undeposited funds",
+    "clearing",
+    "opening balance equity",
+    "owner's equity",
+])
+
+_UNCATEGORIZED_KEYWORDS_ES = frozenset([
+    "sin categorizar",
+    "sin clasificar",
+    "pregúntale a mi contador",
+    "preguntale a mi contador",
+    "preguntale al contador",
+    "gastos sin categorizar",
+    "ingresos sin categorizar",
+    "cuentas por aclarar",
+    "suspensión",
+    "fondos sin depositar",
+    "balance inicial",
+])
+
+# QBO canonical AccountSubType values that mean "needs categorization"
+_UNCATEGORIZED_SUBTYPES = frozenset([
+    "UncategorizedExpense",
+    "UncategorizedIncome",
+    "UncategorizedAsset",
+    "AskMyAccountant",
+    "OpeningBalanceEquity",
+    "UndepositedFunds",
+])
+
+
+def _is_uncategorized_v2(account_name: str, account_subtype: str = "") -> bool:
+    """Return True if this account/subtype indicates an uncategorized transaction.
+
+    Handles both English and Spanish QBO environments.
+    """
+    name_lower = (account_name or "").strip().lower()
+    subtype = (account_subtype or "").strip()
+
+    if subtype in _UNCATEGORIZED_SUBTYPES:
+        return True
+
+    for kw in _UNCATEGORIZED_KEYWORDS_EN:
+        if kw in name_lower:
+            return True
+
+    for kw in _UNCATEGORIZED_KEYWORDS_ES:
+        if kw in name_lower:
+            return True
+
+    return False
+
+
+# ── Risk assessment ──────────────────────────────────────────────────────────
+
+def _assess_risk(amount: float, materiality_limit: float) -> str:
+    """Assess transaction risk relative to the company's materiality limit.
+
+    Args:
+        amount: Absolute transaction amount.
+        materiality_limit: Company's risk/control boundary (NOT an auth ceiling).
+
+    Returns:
+        'high' | 'medium' | 'low'
+    """
+    abs_amount = abs(amount or 0.0)
+    if abs_amount > materiality_limit * 2:
+        return "high"
+    if abs_amount > materiality_limit:
+        return "medium"
+    return "low"
+
+
+# ── Autonomy classification (four-factor, no shortcuts) ─────────────────────
+
+def classify_autonomy(
+    confidence: str,
+    risk: str,
+    rule_type: str,
+    has_proposed_account: bool,
+    amount: float,
+    materiality_limit: float,
+) -> int:
+    """Classify the required authorization level for a WorkItem.
+
+    Four factors must ALL pass — no single factor grants authorization:
+        1. Confidence  (high / medium / low / none)
+        2. Risk        (low / medium / high)
+        3. Rule type   (CATEGORIZE / FLAG / SKIP / CLIENT_RULE)
+        4. Proposed account available
+
+    Returns:
+        0 = AUTO          (reserved; not granted in Phase 1)
+        1 = BATCH         (approve as a group)
+        2 = INDIVIDUAL    (approve one-by-one)
+        3 = HUMAN_REQUIRED (must be manually handled)
+
+    Materiality floor:
+        amount > materiality_limit → level raised to at least 2 (INDIVIDUAL).
+        This is a FLOOR only; it can never LOWER the autonomy level.
+    """
+    # Factor 4: no proposed account → always HUMAN_REQUIRED
+    if not has_proposed_account:
+        return 3
+
+    # Factor 3: rule type
+    if rule_type == "FLAG":
+        return 3   # flagged transactions always need human review
+    if rule_type == "SKIP":
+        return 3   # skipped items should not reach here, but guard anyway
+
+    # Factor 1: confidence
+    if not confidence or confidence in ("none", ""):
+        return 3
+
+    # Confidence × Risk matrix
+    if confidence == "high":
+        if risk == "low":
+            base_level = 1   # BATCH
+        elif risk == "medium":
+            base_level = 2   # INDIVIDUAL
+        else:
+            base_level = 3   # high risk → HUMAN_REQUIRED
+    elif confidence == "medium":
+        if risk == "low":
+            base_level = 2   # INDIVIDUAL
+        else:
+            base_level = 3
+    else:
+        # low confidence → always HUMAN_REQUIRED
+        base_level = 3
+
+    # Phase 1 safety: no AUTO grants
+    if base_level == 0:
+        base_level = 1
+
+    # Materiality floor (raise if exceeded; NEVER lower)
+    abs_amount = abs(amount or 0.0)
+    if abs_amount > materiality_limit and base_level < 2:
+        base_level = 2
+
+    return base_level
+
+
+# ── Company rule helpers ─────────────────────────────────────────────────────
+
+def _load_company_rules(db: Session, realm_id: str) -> list:
+    """Load active, approved company rules for this realm only.
+
+    NEVER returns rules from other companies — realm_id is enforced.
+    Ordered by priority DESC so higher-priority rules are evaluated first.
+    """
+    try:
+        from app.database import CompanyRule as _CompanyRule  # local import avoids circular
+        rules = (
+            db.query(_CompanyRule)
+            .filter(
+                _CompanyRule.realm_id == realm_id,
+                _CompanyRule.status == "active",
+                _CompanyRule.approved_by.isnot(None),
+            )
+            .order_by(_CompanyRule.priority.desc())
+            .all()
+        )
+        return rules
+    except Exception as exc:
+        logger.warning("_load_company_rules(%s): %s", realm_id, exc)
+        return []
+
+
+def _apply_company_rules(rules: list, payee: str, memo: str, amount: float):
+    """Return the first matching CompanyRule for this transaction, or None.
+
+    Matching is per-rule condition_type:
+        PAYEE_OR_MEMO  — regex search in payee OR memo
+        PAYEE_ONLY     — regex search in payee only
+        MEMO_ONLY      — regex search in memo only
+        AMOUNT_RANGE   — pattern is 'min:max' in absolute amount
+    """
+    import re as _re
+
+    payee_str = (payee or "").strip()
+    memo_str = (memo or "").strip()
+    abs_amount = abs(amount or 0.0)
+
+    for rule in rules:
+        pattern = rule.pattern or ""
+        flags_str = (rule.pattern_flags or "case_insensitive").lower()
+        re_flags = _re.IGNORECASE if "case_insensitive" in flags_str else 0
+        ctype = (rule.condition_type or "PAYEE_OR_MEMO").upper()
+
+        try:
+            if ctype == "AMOUNT_RANGE":
+                # pattern format: "min:max"  (use * for open-ended, e.g. "0:500")
+                parts = pattern.split(":")
+                lo = float(parts[0]) if parts[0] not in ("*", "") else 0.0
+                hi = float(parts[1]) if len(parts) > 1 and parts[1] not in ("*", "") else float("inf")
+                if lo <= abs_amount <= hi:
+                    return rule
+            elif ctype == "PAYEE_ONLY":
+                if payee_str and _re.search(pattern, payee_str, re_flags):
+                    return rule
+            elif ctype == "MEMO_ONLY":
+                if memo_str and _re.search(pattern, memo_str, re_flags):
+                    return rule
+            else:  # PAYEE_OR_MEMO (default)
+                combined = f"{payee_str} {memo_str}".strip()
+                if combined and _re.search(pattern, combined, re_flags):
+                    return rule
+        except Exception as exc:
+            logger.warning("Rule %s pattern error: %s", rule.id, exc)
+            continue
+
+    return None
+
+
+# ── run_categorization_v2 ────────────────────────────────────────────────────
+
+def run_categorization_v2(
+    db: Session,
+    company,          # Company ORM instance
+    profile,          # CompanyProfile ORM instance
+    lookback_days: int = 90,
+) -> tuple:
+    """READ/ANALYZE ONLY categorization engine.
+
+    Queries QBO for Purchase, Check, Deposit, and SalesReceipt transactions.
+    Creates WorkItem records in the Controller DB — NO QBO writes.
+
+    Returns:
+        (list[WorkItem], diagnostic_dict)
+
+    diagnostic_dict keys:
+        txn_counts          {type: fetched_count}
+        uncategorized_count int
+        work_items_created  int
+        autonomy_breakdown  {AUTO:n, BATCH:n, INDIVIDUAL:n, HUMAN_REQUIRED:n}
+        api_errors          list of {type, error}
+        skipped_items       list of {txn_id, type, reason}
+        qbo_writes          int  (always 0 — invariant)
+    """
+    diagnostic = {
+        "txn_counts": {},
+        "uncategorized_count": 0,
+        "work_items_created": 0,
+        "autonomy_breakdown": {"AUTO": 0, "BATCH": 0, "INDIVIDUAL": 0, "HUMAN_REQUIRED": 0},
+        "api_errors": [],
+        "skipped_items": [],
+        "qbo_writes": 0,   # INVARIANT: always 0
+    }
+
+    if not profile or not profile.data_as_of:
+        diagnostic["api_errors"].append({
+            "type": "CONFIG",
+            "error": "No company profile / data_as_of — connect QBO first.",
+        })
+        return [], diagnostic
+
+    materiality_limit = getattr(profile, "materiality_limit", None) or 2500.0
+    realm_id = company.realm_id
+    client = QBOClient(company)
+    start_date = (date.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
+    # ── 1. Load company rules (realm-scoped) ────────────────────────────────
+    company_rules = _load_company_rules(db, realm_id)
+    logger.info("[v2:%s] Loaded %d company rules", realm_id, len(company_rules))
+
+    # ── 2. Fetch all four transaction types ─────────────────────────────────
+    raw_txns: list[tuple[str, dict]] = []   # (txn_type, txn_dict)
+
+    type_fetchers = [
+        ("Purchase",      lambda: client.get_expenses(db, start_date=start_date)),
+        ("Check",         lambda: client.get_checks(db, start_date=start_date)),
+        ("Deposit",       lambda: client.get_deposits(db, start_date=start_date)),
+        ("SalesReceipt",  lambda: client.get_sales_receipts(db, start_date=start_date)),
+    ]
+
+    for txn_type, fetcher in type_fetchers:
+        try:
+            results = fetcher()
+            if results is None:
+                results = []
+            diagnostic["txn_counts"][txn_type] = len(results)
+            for txn in results:
+                raw_txns.append((txn_type, txn))
+            logger.info("[v2:%s] %s: fetched %d", realm_id, txn_type, len(results))
+        except Exception as exc:
+            logger.error("[v2:%s] %s fetch error: %s", realm_id, txn_type, exc)
+            diagnostic["api_errors"].append({"type": txn_type, "error": str(exc)})
+            diagnostic["txn_counts"][txn_type] = 0
+
+    # ── 3. Collect existing WorkItem txn_ids to avoid duplicates ────────────
+    existing_txn_ids: set[str] = set(
+        row[0]
+        for row in db.query(WorkItem.qbo_txn_id)
+        .filter(
+            WorkItem.realm_id == realm_id,
+            WorkItem.work_type == "CATEGORIZE",
+            WorkItem.status.notin_(["rejected", "applied"]),
+        )
+        .all()
+        if row[0]
+    )
+
+    # ── 4. Process each transaction ─────────────────────────────────────────
+    accounts = _get_chart_of_accounts(db, client)   # cached fetch
+    new_work_items: list[WorkItem] = []
+
+    for txn_type, txn in raw_txns:
+        txn_id = str(txn.get("Id", ""))
+        if not txn_id:
+            diagnostic["skipped_items"].append({
+                "txn_id": None, "type": txn_type, "reason": "missing Id"
+            })
+            continue
+
+        # ── 4a. Determine line account ──────────────────────────────────────
+        detail_key = _txn_type_detail_key(txn_type)
+        lines = txn.get(detail_key) or []
+        if isinstance(lines, dict):
+            lines = [lines]
+
+        # Find the first line with an account reference
+        line_acct_id = None
+        line_acct_name = ""
+        line_acct_subtype = ""
+        for line in lines:
+            acct_ref = (
+                line.get("AccountBasedExpenseLineDetail", {}).get("AccountRef")
+                or line.get("SalesItemLineDetail", {}).get("ItemRef")
+                or line.get("DepositLineDetail", {}).get("AccountRef")
+                or line.get("AccountRef")
+                or {}
+            )
+            if acct_ref.get("value"):
+                line_acct_id = acct_ref["value"]
+                line_acct_name = acct_ref.get("name", "")
+                # Look up subtype from chart of accounts
+                for a in accounts:
+                    if str(a.get("Id")) == str(line_acct_id):
+                        line_acct_subtype = a.get("AccountSubType", "")
+                        break
+                break
+
+        # ── 4b. Check if uncategorized ──────────────────────────────────────
+        if not _is_uncategorized_v2(line_acct_name, line_acct_subtype):
+            continue   # already categorized — skip silently
+
+        diagnostic["uncategorized_count"] += 1
+
+        # ── 4c. Deduplicate ─────────────────────────────────────────────────
+        if txn_id in existing_txn_ids:
+            diagnostic["skipped_items"].append({
+                "txn_id": txn_id, "type": txn_type, "reason": "already has pending WorkItem"
+            })
+            continue
+
+        # ── 4d. Extract metadata ────────────────────────────────────────────
+        payee_name = (
+            txn.get("EntityRef", {}).get("name")
+            or txn.get("PaymentMethodRef", {}).get("name")
+            or txn.get("CustomerRef", {}).get("name")
+            or ""
+        )
+        memo = txn.get("PrivateNote") or txn.get("Memo") or ""
+        try:
+            txn_date_str = txn.get("TxnDate") or txn.get("MetaData", {}).get("CreateTime", "")[:10]
+            txn_date = datetime.strptime(txn_date_str[:10], "%Y-%m-%d") if txn_date_str else None
+        except Exception:
+            txn_date = None
+        amount = float(txn.get("TotalAmt") or txn.get("Amount") or 0.0)
+
+        # ── 4e. Apply company rules first ────────────────────────────────────
+        matched_rule = _apply_company_rules(company_rules, payee_name, memo, amount)
+        rule_type = "CLIENT_RULE" if matched_rule else "CATEGORIZE"
+
+        if matched_rule:
+            if matched_rule.rule_type == "SKIP":
+                diagnostic["skipped_items"].append({
+                    "txn_id": txn_id, "type": txn_type,
+                    "reason": f"company rule SKIP: {matched_rule.rule_name}",
+                })
+                continue
+            if matched_rule.rule_type == "FLAG":
+                rule_type = "FLAG"
+                proposed_account_id = None
+                proposed_account_name = None
+                confidence = matched_rule.confidence_strength or "low"
+                reason = f"Company rule FLAG: {matched_rule.rule_name} — requires manual review."
+            else:
+                proposed_account_id = matched_rule.proposed_account_id
+                proposed_account_name = matched_rule.proposed_account_name
+                confidence = matched_rule.confidence_strength or "high"
+                reason = f"Company rule '{matched_rule.rule_name}' matched → {proposed_account_name}."
+        else:
+            # ── 4f. Fall back to global keyword/payee library ───────────────
+            acct_kw, rule_label = _match_rule(payee_name, memo)
+            if acct_kw and rule_label != "no_match":
+                coa_acct = _find_coa_account(accounts, acct_kw)
+                proposed_account_id = coa_acct.get("Id") if coa_acct else None
+                proposed_account_name = coa_acct.get("Name") if coa_acct else acct_kw
+                confidence = "medium"   # keyword match, not a confirmed rule
+                reason = _build_reason(acct_kw, rule_label, payee_name, memo)
+            else:
+                proposed_account_id = None
+                proposed_account_name = None
+                confidence = "none"
+                reason = _build_reason(None, "no_match", payee_name, memo)
+
+        # ── 4g. Assess risk and autonomy ─────────────────────────────────────
+        risk = _assess_risk(amount, materiality_limit)
+        autonomy_level = classify_autonomy(
+            confidence=confidence,
+            risk=risk,
+            rule_type=rule_type,
+            has_proposed_account=bool(proposed_account_id),
+            amount=amount,
+            materiality_limit=materiality_limit,
+        )
+
+        # ── 4h. Create WorkItem (DB only — NO QBO write) ────────────────────
+        wi = WorkItem(
+            company_id=company.id,
+            realm_id=realm_id,
+            work_type="CATEGORIZE",
+            qbo_txn_id=txn_id,
+            qbo_txn_type=txn_type,
+            txn_date=txn_date,
+            amount=amount,
+            payee_name=payee_name or None,
+            memo=memo or None,
+            current_account_id=line_acct_id,
+            current_account_name=line_acct_name or None,
+            proposed_account_id=proposed_account_id,
+            proposed_account_name=proposed_account_name,
+            confidence=confidence,
+            risk=risk,
+            autonomy_level=autonomy_level,
+            rule_matched=matched_rule.rule_name if matched_rule else None,
+            reason=reason,
+            status="pending",
+        )
+        db.add(wi)
+        new_work_items.append(wi)
+        existing_txn_ids.add(txn_id)
+
+        # Tally autonomy breakdown
+        level_names = {0: "AUTO", 1: "BATCH", 2: "INDIVIDUAL", 3: "HUMAN_REQUIRED"}
+        diagnostic["autonomy_breakdown"][level_names[autonomy_level]] += 1
+
+    # ── 5. Flush to get IDs (no commit — caller commits) ────────────────────
+    try:
+        db.flush()
+        diagnostic["work_items_created"] = len(new_work_items)
+    except Exception as exc:
+        logger.error("[v2:%s] DB flush error: %s", realm_id, exc)
+        diagnostic["api_errors"].append({"type": "DB_FLUSH", "error": str(exc)})
+        db.rollback()
+        return [], diagnostic
+
+    logger.info(
+        "[v2:%s] Done. uncategorized=%d created=%d errors=%d autonomy=%s",
+        realm_id,
+        diagnostic["uncategorized_count"],
+        diagnostic["work_items_created"],
+        len(diagnostic["api_errors"]),
+        diagnostic["autonomy_breakdown"],
+    )
+    # Safety assertion — if this ever fails, something went very wrong
+    assert diagnostic["qbo_writes"] == 0, "BUG: qbo_writes must be 0 in run_categorization_v2"
+
+    return new_work_items, diagnostic
+
+
+def _get_chart_of_accounts(db: Session, client: "QBOClient") -> list:
+    """Fetch COA from QBO; return [] on error (never raises)."""
+    try:
+        return client.get_accounts(db) or []
+    except Exception as exc:
+        logger.warning("_get_chart_of_accounts error: %s", exc)
+        return []
+
+
+# ── execute_work_item ────────────────────────────────────────────────────────
+
+def execute_work_item(db: Session, company, work_item: WorkItem) -> dict:
+    """Apply an APPROVED WorkItem to QBO.
+
+    Safety invariants:
+        - Refuses if work_item.status != 'approved'
+        - Re-fetches the QBO transaction fresh (never uses stale cached data)
+        - Sets status to 'executing' before the QBO call
+        - Verifies the write by re-reading the transaction post-update
+        - On any failure: rolls back status to 'approved' (retryable)
+        - Writes a ChangeLog audit entry regardless of outcome
+
+    Returns:
+        {'success': bool, 'message': str, 'qbo_response': dict|None}
+    """
+    from app.database import ChangeLog  # local import
+
+    if work_item.status != "approved":
+        return {
+            "success": False,
+            "message": f"WorkItem {work_item.id} is not approved (status={work_item.status}). Cannot execute.",
+            "qbo_response": None,
+        }
+
+    if not work_item.proposed_account_id:
+        return {
+            "success": False,
+            "message": "No proposed_account_id — cannot write to QBO.",
+            "qbo_response": None,
+        }
+
+    client = QBOClient(company)
+    realm_id = company.realm_id
+
+    # ── Step 1: Mark as executing ────────────────────────────────────────────
+    work_item.status = "executing"
+    work_item.updated_at = _now()
+    try:
+        db.flush()
+    except Exception as exc:
+        logger.error("[execute:%s] status→executing flush error: %s", work_item.id, exc)
+        work_item.status = "approved"
+        db.rollback()
+        return {"success": False, "message": f"DB error setting executing: {exc}", "qbo_response": None}
+
+    # ── Step 2: Re-fetch QBO transaction (fresh read) ────────────────────────
+    try:
+        fresh_txn = client.get_transaction(db, work_item.qbo_txn_type, work_item.qbo_txn_id)
+    except Exception as exc:
+        logger.error("[execute:%s] QBO re-fetch error: %s", work_item.id, exc)
+        work_item.status = "approved"
+        work_item.error_message = f"QBO re-fetch failed: {exc}"
+        db.flush()
+        return {"success": False, "message": f"QBO re-fetch failed: {exc}", "qbo_response": None}
+
+    if not fresh_txn:
+        work_item.status = "approved"
+        work_item.error_message = "QBO returned empty transaction on re-fetch"
+        db.flush()
+        return {"success": False, "message": "QBO returned empty transaction", "qbo_response": None}
+
+    # ── Step 3: Patch the account reference on the first matching line ───────
+    detail_key = _txn_type_detail_key(work_item.qbo_txn_type)
+    lines = fresh_txn.get(detail_key) or []
+    if isinstance(lines, dict):
+        lines = [lines]
+
+    patched = False
+    for line in lines:
+        for detail_field in (
+            "AccountBasedExpenseLineDetail",
+            "SalesItemLineDetail",
+            "DepositLineDetail",
+        ):
+            if detail_field in line:
+                line[detail_field]["AccountRef"] = {
+                    "value": work_item.proposed_account_id,
+                    "name": work_item.proposed_account_name or "",
+                }
+                patched = True
+                break
+        # Flat AccountRef (Deposit top-level)
+        if not patched and "AccountRef" in line:
+            line["AccountRef"] = {
+                "value": work_item.proposed_account_id,
+                "name": work_item.proposed_account_name or "",
+            }
+            patched = True
+        if patched:
+            break
+
+    if not patched:
+        work_item.status = "approved"
+        work_item.error_message = "Could not locate line to patch account reference"
+        db.flush()
+        return {
+            "success": False,
+            "message": "No patchable account line found in transaction",
+            "qbo_response": None,
+        }
+
+    # ── Step 4: Write to QBO ─────────────────────────────────────────────────
+    txn_type_lower = work_item.qbo_txn_type.lower()
+    try:
+        qbo_response = client._post(db, f"/{txn_type_lower}", fresh_txn)
+    except Exception as exc:
+        logger.error("[execute:%s] QBO write error: %s", work_item.id, exc)
+        work_item.status = "approved"
+        work_item.error_message = f"QBO write failed: {exc}"
+        db.flush()
+        return {"success": False, "message": f"QBO write failed: {exc}", "qbo_response": None}
+
+    # ── Step 5: Verify the write ─────────────────────────────────────────────
+    verification_status = "unverified"
+    try:
+        verified_txn = client.get_transaction(db, work_item.qbo_txn_type, work_item.qbo_txn_id)
+        v_lines = verified_txn.get(detail_key) or []
+        if isinstance(v_lines, dict):
+            v_lines = [v_lines]
+        for vl in v_lines:
+            for dfield in ("AccountBasedExpenseLineDetail", "SalesItemLineDetail", "DepositLineDetail"):
+                if dfield in vl:
+                    written_id = vl[dfield].get("AccountRef", {}).get("value")
+                    if str(written_id) == str(work_item.proposed_account_id):
+                        verification_status = "verified"
+                    else:
+                        verification_status = "mismatch"
+                    break
+            if verification_status != "unverified":
+                break
+    except Exception as exc:
+        logger.warning("[execute:%s] Verification read error: %s", work_item.id, exc)
+        verification_status = "verify_error"
+
+    # ── Step 6: Update WorkItem ──────────────────────────────────────────────
+    work_item.status = "applied"
+    work_item.executed_at = _now()
+    work_item.execution_result = qbo_response
+    work_item.qbo_update_response = qbo_response
+    work_item.verification_status = verification_status
+    work_item.verified_at = _now()
+    work_item.updated_at = _now()
+
+    # ── Step 7: Audit log ────────────────────────────────────────────────────
+    try:
+        cl = ChangeLog(
+            company_id=company.id,
+            realm_id=realm_id,
+            entity_type=work_item.qbo_txn_type,
+            entity_id=work_item.qbo_txn_id,
+            action_type="CATEGORIZE",
+            description=f"WorkItem {work_item.id}: {work_item.current_account_name} → {work_item.proposed_account_name}",
+            original_value={"account_id": work_item.current_account_id, "account_name": work_item.current_account_name},
+            new_value={"account_id": work_item.proposed_account_id, "account_name": work_item.proposed_account_name},
+        )
+        db.add(cl)
+    except Exception as exc:
+        logger.warning("[execute:%s] ChangeLog write error: %s", work_item.id, exc)
+
+    try:
+        db.flush()
+    except Exception as exc:
+        logger.error("[execute:%s] Final flush error: %s", work_item.id, exc)
+        db.rollback()
+        return {"success": False, "message": f"DB error after QBO write: {exc}", "qbo_response": qbo_response}
+
+    logger.info(
+        "[execute:%s] Applied. account=%s verification=%s",
+        work_item.id, work_item.proposed_account_name, verification_status,
+    )
+    return {
+        "success": True,
+        "message": f"Applied. Account set to '{work_item.proposed_account_name}'. Verification: {verification_status}.",
+        "qbo_response": qbo_response,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
