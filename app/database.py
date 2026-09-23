@@ -71,6 +71,9 @@ class Company(Base):
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
+    # Company type — used to activate restaurant-specific features
+    company_type = Column(String(30), default="standard")   # standard | restaurant
+
     # Relationships
     profile = relationship("CompanyProfile", back_populates="company", uselist=False,
                            cascade="all, delete-orphan")
@@ -84,6 +87,14 @@ class Company(Base):
                               cascade="all, delete-orphan")
     month_end_closes = relationship("MonthEndClose", back_populates="company",
                                     cascade="all, delete-orphan")
+    external_credentials = relationship("ExternalCredentials", back_populates="company",
+                                        cascade="all, delete-orphan")
+    proposed_categorizations = relationship("ProposedCategorization", back_populates="company",
+                                            cascade="all, delete-orphan")
+    restaurant_sales = relationship("RestaurantSalesData", back_populates="company",
+                                    cascade="all, delete-orphan")
+    ar_matches = relationship("ProposedARMatch", back_populates="company",
+                              cascade="all, delete-orphan")
 
 
 # ── Company Accounting Profile ────────────────────────────────
@@ -329,6 +340,167 @@ class MonthEndClose(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
     company = relationship("Company", back_populates="month_end_closes")
+
+
+# ── External Platform Credentials ────────────────────────────
+class ExternalCredentials(Base):
+    """Encrypted OAuth tokens / API keys for third-party platforms (Square, etc.)."""
+    __tablename__ = "external_credentials"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+
+    platform = Column(String(50), nullable=False)   # square | grubhub | ubereats | doordash | otter | picnic
+    credentials_enc = Column(Text)                  # encrypted JSON: {access_token, refresh_token, ...}
+    account_id = Column(String(200))                # platform account / merchant ID
+    location_id = Column(String(200))               # Square location ID (or equivalent)
+    location_name = Column(String(200))
+    webhook_signature_key_enc = Column(Text)        # for webhook verification
+
+    connected_at = Column(DateTime)
+    last_sync = Column(DateTime)
+    status = Column(String(20), default="disconnected")  # connected | disconnected | error
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="external_credentials")
+
+
+# ── Proposed Categorizations ──────────────────────────────────
+class ProposedCategorization(Base):
+    """
+    AI-suggested reclassification for uncategorized / Ask My Accountant transactions.
+    One row per transaction that needs categorization.
+    """
+    __tablename__ = "proposed_categorizations"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+
+    # Source transaction
+    qbo_txn_id = Column(String(100), nullable=False)
+    qbo_txn_type = Column(String(50))       # Purchase | Expense | Check | Deposit | etc.
+    txn_date = Column(DateTime)
+    amount = Column(Float)
+    payee_name = Column(String(255))        # vendor or customer name
+    memo = Column(String(500))
+
+    # Current (wrong) account
+    current_account_id = Column(String(100))
+    current_account_name = Column(String(255))
+
+    # Suggested (correct) account
+    suggested_account_id = Column(String(100))
+    suggested_account_name = Column(String(255))
+    suggested_account_type = Column(String(50))
+
+    # AI reasoning
+    confidence = Column(String(10))         # high | medium | low
+    reason = Column(Text)                   # why this category was suggested
+    rule_matched = Column(String(255))      # which rule/pattern triggered this
+
+    # Approval workflow
+    status = Column(String(20), default="pending")  # pending | approved | rejected | applied | skipped
+    approved_by = Column(String(100))
+    approved_at = Column(DateTime)
+    applied_at = Column(DateTime)
+    rejection_reason = Column(Text)
+    qbo_update_response = Column(JSONType)
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="proposed_categorizations")
+
+
+# ── Restaurant Daily Sales ────────────────────────────────────
+class RestaurantSalesData(Base):
+    """
+    Daily sales summary per platform for restaurant companies.
+    Sourced from Square API, delivery platform exports, or manual entry.
+    """
+    __tablename__ = "restaurant_sales_data"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+
+    sales_date = Column(String(10), nullable=False)     # YYYY-MM-DD
+    platform = Column(String(50), nullable=False)       # square | grubhub | ubereats | doordash | otter | picnic | instore
+
+    # Sales figures (all positive)
+    gross_sales = Column(Float, default=0.0)            # total customer-facing sales
+    refunds = Column(Float, default=0.0)                # refunds / voids
+    net_sales = Column(Float, default=0.0)              # gross - refunds
+    tax_collected = Column(Float, default=0.0)          # sales tax collected from customers
+    tips = Column(Float, default=0.0)
+    platform_fees = Column(Float, default=0.0)          # commissions, processing fees
+    other_deductions = Column(Float, default=0.0)       # chargebacks, adjustments
+    payout_amount = Column(Float, default=0.0)          # net deposit to bank
+
+    # Source tracking
+    source = Column(String(20), default="api")          # api | csv | manual
+    raw_data = Column(JSONType)                         # original API/CSV response for audit
+
+    # QBO Journal Entry
+    je_id = Column(String(36))                          # FK to ProposedJournalEntry.id
+    je_number = Column(String(50))
+    je_status = Column(String(20), default="pending")   # pending | proposed | approved | posted
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="restaurant_sales")
+
+
+# ── AR Proposed Match ─────────────────────────────────────────
+class ProposedARMatch(Base):
+    """
+    AI-proposed match between an open invoice and an unapplied payment.
+    Requires approval before applying in QBO.
+    """
+    __tablename__ = "proposed_ar_matches"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+
+    # Invoice side
+    invoice_id = Column(String(100))
+    invoice_number = Column(String(50))
+    invoice_date = Column(DateTime)
+    invoice_due_date = Column(DateTime)
+    invoice_amount = Column(Float)
+    invoice_balance = Column(Float)
+    customer_name = Column(String(255))
+
+    # Payment side
+    payment_id = Column(String(100))
+    payment_date = Column(DateTime)
+    payment_amount = Column(Float)
+    payment_method = Column(String(50))
+    payment_memo = Column(String(500))
+
+    # Match details
+    match_amount = Column(Float)                        # amount to apply (may be partial)
+    match_confidence = Column(String(10))               # high | medium | low
+    match_reason = Column(Text)                         # why this match was suggested
+    amount_difference = Column(Float, default=0.0)      # difference after match
+
+    # Status
+    status = Column(String(20), default="pending")      # pending | approved | rejected | applied
+    approved_by = Column(String(100))
+    approved_at = Column(DateTime)
+    applied_at = Column(DateTime)
+    qbo_response = Column(JSONType)
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="ar_matches")
 
 
 # ── Database Setup ────────────────────────────────────────────
