@@ -46,10 +46,10 @@
               <select name="account_id" class="form-select form-select-sm" required>
                 <option value="">Select account…</option>
                 {% for acct in accounts %}
-                <option value="{{ acct.Id }}"
-                  {% if selected_account_id == acct.Id %}selected{% endif %}
-                  data-name="{{ acct.Name }}">
-                  {{ acct.Name }} ({{ acct.AccountType }})
+                <option value="{{ acct.id }}"
+                  {% if selected_account_id == acct.id %}selected{% endif %}
+                  data-name="{{ acct.name }}">
+                  {{ acct.name }} ({{ acct.type }})
                 </option>
                 {% endfor %}
               </select>
