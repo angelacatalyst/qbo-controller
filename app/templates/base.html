@@ -175,8 +175,11 @@
   </div>
   {% elif company is defined %}
   <div class="nav-section" style="margin-top:8px;">CURRENT WORKSPACE</div>
-  <a href="/company/{{ company.realm_id }}" class="nav-link {% if '/company/' in request.url.path and '/issues' not in request.url.path %}active{% endif %}">
+  <a href="/company/{{ company.realm_id }}" class="nav-link {% if request.url.path == '/company/' ~ company.realm_id %}active{% endif %}">
     <i class="bi bi-building"></i> Overview
+  </a>
+  <a href="/company/{{ company.realm_id }}/assessment" class="nav-link {% if '/assessment' in request.url.path %}active{% endif %}">
+    <i class="bi bi-clipboard2-pulse-fill"></i> Assessment
   </a>
   <a href="/company/{{ company.realm_id }}/issues" class="nav-link {% if '/issues' in request.url.path %}active{% endif %}">
     <i class="bi bi-exclamation-triangle-fill"></i> Issues
