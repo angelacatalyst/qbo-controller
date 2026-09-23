@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}Restaurant Sales — {{ company.company_name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+  .platform-badge {
+    display:inline-flex; align-items:center; gap:5px;
+    padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;
+    letter-spacing:.04em; text-transform:uppercase;
+  }
+  .platform-square   { background:#f0fdf4; color:#166534; border:1px solid #86efac; }
+  .platform-grubhub  { background:#fff7ed; color:#c2410c; border:1px solid #fdba74; }
+  .platform-uber_eats{ background:#fffbeb; color:#92400e; border:1px solid #fcd34d; }
+  .platform-doordash { background:#fef2f2; color:#991b1b; border:1px solid #fca5a5; }
+  .platform-otter    { background:#f0f9ff; color:#0369a1; border:1px solid #7dd3fc; }
+  .platform-picnic   { background:#faf5ff; color:#7e22ce; border:1px solid #d8b4fe; }
+
+  .sales-date-header {
+    background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px;
+    padding:12px 18px; margin-bottom:8px; cursor:pointer;
+  }
+  .sales-date-header:hover { border-color:#93c5fd; }
+  .sales-table td { font-size:13px; vertical-align:middle; }
+  .je-status-pending   { color:#d97706; font-weight:600; }
+  .je-status-generated { color:#2563eb; font-weight:600; }
+  .je-status-applied   { color:#16a34a; font-weight:600; }
+  .connect-card { border:2px dashed #e2e8f0; border-radius:12px; padding:20px; text-align:center; }
+  .connect-card.connected { border-color:#86efac; background:#f0fdf4; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="topbar">
+  <div class="company-context">
+    <strong>{{ company.company_name }}</strong>
+    <span class="realm-badge">{{ company.realm_id }}</span>
+    <span class="text-muted" style="font-size:12px;">/ Restaurant Sales & Journal Entries</span>
+  </div>
+</div>
+
+<div class="container-fluid p-4">
+
+  {% if saved %}
+  <div class="alert alert-success alert-dismissible d-flex align-items-center gap-2 mb-3">
+    <i class="bi bi-check-circle-fill"></i> {{ saved }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+  {% if error %}
+  <div class="alert alert-danger alert-dismissible d-flex align-items-center gap-2 mb-3">
+    <i class="bi bi-exclamation-triangle-fill"></i> {{ error }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+
+  <div class="row g-4">
+
+    <!-- Left: Platforms & Import -->
+    <div class="col-lg-4">
+
+      <!-- Connected Platforms -->
+      <div class="card mb-3" style="border:1px solid #e2e8f0; border-radius:12px;">
+        <div class="card-header bg-white fw-bold py-3">
+          <i class="bi bi-plug-fill me-2 text-success"></i>Connected Platforms
+        </div>
+        <div class="card-body">
+
+          <!-- Square -->
+          {% if 'square' in connected_platforms %}
+          <div class="connect-card connected mb-3">
+            <i class="bi bi-check-circle-fill text-success fs-4 d-block mb-1"></i>
+            <strong>Square</strong> — Connected
+            <div class="text-muted" style="font-size:11px; margin-top:4px;">
+              {{ connected_platforms['square'].location_name or connected_platforms['square'].account_id }}
+            </div>
+            <form method="post" action="/company/{{ company.realm_id }}/restaurant/fetch-square" class="mt-2 d-flex gap-2 justify-content-center">
+              <input type="date" name="sales_date" class="form-control form-control-sm" style="width:140px;" required>
+              <button class="btn btn-success btn-sm"><i class="bi bi-cloud-download"></i> Fetch</button>
+            </form>
+          </div>
+          {% elif square_auth_url %}
+          <div class="connect-card mb-3">
+            <i class="bi bi-square text-muted fs-4 d-block mb-2"></i>
+            <strong>Square</strong>
+            <div class="text-muted" style="font-size:12px; margin-bottom:10px;">Not connected</div>
+            <a href="{{ square_auth_url }}" class="btn btn-sm btn-outline-success">
+              <i class="bi bi-plug me-1"></i>Connect Square
+            </a>
+          </div>
+          {% endif %}
+
+          <!-- CSV Import Platforms -->
+          {% for platform, label, icon in [
+              ('grubhub', 'GrubHub', 'bag-fill'),
+              ('uber_eats', 'Uber Eats', 'bicycle'),
+              ('doordash', 'DoorDash', 'bag-check-fill'),
+              ('otter', 'Otter', 'phone-fill'),
+              ('picnic', 'Picnic', 'basket2-fill')
+          ] %}
+          <div class="mb-3">
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <i class="bi bi-{{ icon }}" style="font-size:15px;"></i>
+              <strong style="font-size:13px;">{{ label }}</strong>
+              <span class="text-muted" style="font-size:11px;">CSV Import</span>
+            </div>
+            <form method="post" action="/company/{{ company.realm_id }}/restaurant/import-csv" enctype="multipart/form-data">
+              <input type="hidden" name="platform" value="{{ platform }}">
+              <div class="d-flex gap-2">
+                <input type="date" name="sales_date" class="form-control form-control-sm" style="width:130px;" required>
+                <input type="file" name="csv_file" accept=".csv" class="form-control form-control-sm" required>
+                <button class="btn btn-outline-primary btn-sm flex-shrink-0">
+                  <i class="bi bi-upload"></i>
+                </button>
+              </div>
+            </form>
+          </div>
+          {% endfor %}
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Sales data by date -->
+    <div class="col-lg-8">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h6 class="fw-bold mb-0"><i class="bi bi-calendar3 me-2 text-primary"></i>Sales Data — Last 30 Days</h6>
+      </div>
+
+      {% if by_date %}
+        {% for date_str, records in by_date.items() | sort(reverse=True) %}
+        {% set total_net = namespace(v=0) %}
+        {% set total_fees = namespace(v=0) %}
+        {% set total_payout = namespace(v=0) %}
+        {% set has_je = namespace(v=false) %}
+        {% set je_status = namespace(v='none') %}
+        {% for r in records %}
+          {% set total_net.v = total_net.v + (r.net_sales or 0) %}
+          {% set total_fees.v = total_fees.v + (r.platform_fees or 0) %}
+          {% set total_payout.v = total_payout.v + (r.payout_amount or 0) %}
+          {% if r.je_status %}{% set has_je.v = true %}{% set je_status.v = r.je_status %}{% endif %}
+        {% endfor %}
+
+        <div class="sales-date-header" data-bs-toggle="collapse" data-bs-target="#date-{{ loop.index }}">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="d-flex align-items-center gap-3">
+              <span class="fw-bold">{{ date_str }}</span>
+              <div class="d-flex gap-1 flex-wrap">
+                {% for r in records %}
+                <span class="platform-badge platform-{{ r.platform }}">{{ r.platform | replace('_', ' ') }}</span>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-4 text-end">
+              <div>
+                <div class="text-muted" style="font-size:10px;">NET SALES</div>
+                <div class="fw-bold">{{ total_net.v | currency }}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size:10px;">PLATFORM FEES</div>
+                <div class="fw-bold text-danger">{{ total_fees.v | currency }}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size:10px;">PAYOUT</div>
+                <div class="fw-bold text-success">{{ total_payout.v | currency }}</div>
+              </div>
+              <div style="min-width:160px;">
+                {% if has_je.v %}
+                <span class="je-status-{{ je_status.v }}">
+                  {% if je_status.v == 'pending' %}<i class="bi bi-clock me-1"></i>JE Pending Approval
+                  {% elif je_status.v == 'applied' %}<i class="bi bi-check-circle me-1"></i>JE Applied to QBO
+                  {% else %}<i class="bi bi-file-earmark me-1"></i>JE {{ je_status.v }}
+                  {% endif %}
+                </span>
+                {% else %}
+                <form method="post" action="/company/{{ company.realm_id }}/restaurant/generate-je/{{ date_str }}">
+                  <button class="btn btn-primary btn-sm">
+                    <i class="bi bi-plus-circle me-1"></i>Generate JE
+                  </button>
+                </form>
+                {% endif %}
+              </div>
+              <i class="bi bi-chevron-down text-muted"></i>
+            </div>
+          </div>
+        </div>
+
+        <div class="collapse mb-3" id="date-{{ loop.index }}">
+          <div class="table-responsive px-2 pb-2">
+            <table class="table table-sm table-hover sales-table mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Platform</th>
+                  <th>Gross Sales</th>
+                  <th>Refunds</th>
+                  <th>Net Sales</th>
+                  <th>Tax</th>
+                  <th>Tips</th>
+                  <th>Platform Fees</th>
+                  <th>Payout</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in records %}
+                <tr>
+                  <td><span class="platform-badge platform-{{ r.platform }}">{{ r.platform | replace('_', ' ') }}</span></td>
+                  <td>{{ (r.gross_sales or 0) | currency }}</td>
+                  <td class="text-danger">{{ (r.refunds or 0) | currency }}</td>
+                  <td class="fw-medium">{{ (r.net_sales or 0) | currency }}</td>
+                  <td>{{ (r.tax_collected or 0) | currency }}</td>
+                  <td>{{ (r.tips or 0) | currency }}</td>
+                  <td class="text-danger">{{ (r.platform_fees or 0) | currency }}</td>
+                  <td class="fw-bold text-success">{{ (r.payout_amount or 0) | currency }}</td>
+                  <td>
+                    <span class="badge {% if r.source == 'api' %}bg-success{% elif r.source == 'csv' %}bg-info{% else %}bg-secondary{% endif %}">
+                      {{ r.source or '—' }}
+                    </span>
+                  </td>
+                </tr>
+                {% endfor %}
+                <tr class="table-secondary fw-bold">
+                  <td>TOTAL</td>
+                  <td>{{ records | map(attribute='gross_sales') | select | sum | currency }}</td>
+                  <td class="text-danger">{{ records | map(attribute='refunds') | select | sum | currency }}</td>
+                  <td>{{ total_net.v | currency }}</td>
+                  <td>{{ records | map(attribute='tax_collected') | select | sum | currency }}</td>
+                  <td>{{ records | map(attribute='tips') | select | sum | currency }}</td>
+                  <td class="text-danger">{{ total_fees.v | currency }}</td>
+                  <td class="text-success">{{ total_payout.v | currency }}</td>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endfor %}
+
+      {% else %}
+      <div class="d-flex align-items-center justify-content-center" style="min-height:300px;">
+        <div class="text-center text-muted">
+          <i class="bi bi-shop" style="font-size:48px; opacity:.3;"></i>
+          <p class="mt-3">No sales data imported yet.</p>
+          <p style="font-size:13px;">Connect Square or upload a CSV report from any delivery platform to get started.</p>
+        </div>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+</div>
+{% endblock %}
