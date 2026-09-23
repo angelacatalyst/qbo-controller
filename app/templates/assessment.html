@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+{% block title %}Assessment — {{ company.company_name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+  .section-card { border:1px solid #e2e8f0; border-radius:12px; margin-bottom:16px; overflow:hidden; }
+  .section-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 18px; background:#f8fafc; border-bottom:1px solid #e2e8f0;
+    cursor:pointer; user-select:none;
+  }
+  .section-header:hover { background:#f1f5f9; }
+  .section-title { font-size:14px; font-weight:700; display:flex; align-items:center; gap:10px; }
+  .section-count { font-size:12px; font-weight:600; padding:2px 8px; border-radius:20px; }
+  .count-red   { background:#fee2e2; color:#991b1b; }
+  .count-amber { background:#fef3c7; color:#92400e; }
+  .count-blue  { background:#dbeafe; color:#1e40af; }
+  .count-green { background:#dcfce7; color:#166534; }
+
+  .issue-row { border-bottom:1px solid #f1f5f9; padding:14px 18px; }
+  .issue-row:last-child { border-bottom:none; }
+  .issue-row:hover { background:#fafbfc; }
+
+  .sev-pill {
+    font-size:10px; font-weight:700; padding:3px 8px; border-radius:20px;
+    text-transform:uppercase; letter-spacing:.05em; white-space:nowrap;
+  }
+  .sev-pill.critical { background:#dc2626; color:#fff; }
+  .sev-pill.high     { background:#d97706; color:#fff; }
+  .sev-pill.medium   { background:#2563eb; color:#fff; }
+  .sev-pill.low      { background:#64748b; color:#fff; }
+
+  .issue-title { font-size:13.5px; font-weight:600; color:#0f172a; }
+  .issue-desc  { font-size:12.5px; color:#475569; margin-top:3px; }
+  .issue-detail { font-size:12px; margin-top:8px; }
+  .issue-detail .label { font-weight:600; color:#64748b; min-width:120px; }
+
+  .run-panel {
+    background:linear-gradient(135deg,#0f172a,#1e3a5f);
+    border-radius:12px; padding:24px; color:#fff; margin-bottom:24px;
+  }
+  .run-panel h5 { font-weight:700; margin-bottom:4px; }
+  .run-panel small { color:#94a3b8; }
+
+  .kpi-mini { text-align:center; padding:16px; }
+  .kpi-mini .num { font-size:32px; font-weight:800; line-height:1; }
+  .kpi-mini .lbl { font-size:11px; margin-top:4px; text-transform:uppercase; letter-spacing:.05em; }
+
+  .resolve-btn { font-size:11px; padding:3px 10px; }
+  .status-open     { color:#dc2626; }
+  .status-reviewed { color:#d97706; }
+  .status-resolved { color:#16a34a; }
+  .status-na       { color:#94a3b8; }
+
+  .empty-section { padding:18px; color:#94a3b8; font-size:13px; font-style:italic; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="topbar">
+  <div class="company-context">
+    <strong>{{ company.company_name }}</strong>
+    <span class="realm-badge">{{ company.realm_id }}</span>
+    <span class="text-muted" style="font-size:12px;">/ Assessment</span>
+  </div>
+  <div class="d-flex gap-2 align-items-center">
+    {% if profile and profile.data_as_of %}
+    <form method="post" action="/company/{{ company.realm_id }}/assess">
+      <button class="btn btn-success btn-sm fw-semibold px-3">
+        <i class="bi bi-clipboard2-pulse me-1"></i>Run Assessment
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="container-fluid p-4">
+
+{% if not profile or not profile.data_as_of %}
+<!-- No data synced yet -->
+<div class="alert alert-warning d-flex align-items-center gap-3" style="border-radius:12px;">
+  <i class="bi bi-exclamation-triangle-fill fs-4"></i>
+  <div>
+    <strong>No QBO data loaded.</strong> You need to sync QBO data first.
+    <form method="post" action="/company/{{ company.realm_id }}/sync" class="d-inline ms-2">
+      <input type="hidden" name="sync_type" value="full">
+      <button class="btn btn-warning btn-sm fw-semibold">
+        <i class="bi bi-arrow-repeat me-1"></i>Sync Now
+      </button>
+    </form>
+  </div>
+</div>
+{% else %}
+
+<!-- Run Panel -->
+<div class="run-panel">
+  <div class="row align-items-center">
+    <div class="col">
+      <h5><i class="bi bi-clipboard2-pulse me-2"></i>QBO Accounting Assessment</h5>
+      <small>
+        Data as of: {{ profile.data_as_of | fmt_date }} &nbsp;·&nbsp;
+        {% if issues %}
+          Last run: {{ issues[0].created_at | fmt_date if issues else 'Never' }} &nbsp;·&nbsp;
+          {{ issues | length }} issue{{ 's' if issues | length != 1 else '' }} found
+        {% else %}
+          Assessment has not been run yet
+        {% endif %}
+      </small>
+    </div>
+    <div class="col-auto">
+      <form method="post" action="/company/{{ company.realm_id }}/assess">
+        <button class="btn btn-light fw-semibold px-4">
+          <i class="bi bi-arrow-repeat me-1"></i>
+          {% if issues %}Re-Run Assessment{% else %}Run Assessment{% endif %}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- KPI row -->
+  {% if issues %}
+  <div class="row mt-3 g-0" style="background:rgba(255,255,255,.07);border-radius:10px;overflow:hidden;">
+    <div class="col kpi-mini border-end" style="border-color:rgba(255,255,255,.1)!important;">
+      <div class="num" style="color:#f87171;">{{ severity_counts.critical }}</div>
+      <div class="lbl" style="color:#94a3b8;">Critical</div>
+    </div>
+    <div class="col kpi-mini border-end" style="border-color:rgba(255,255,255,.1)!important;">
+      <div class="num" style="color:#fbbf24;">{{ severity_counts.high }}</div>
+      <div class="lbl" style="color:#94a3b8;">High</div>
+    </div>
+    <div class="col kpi-mini border-end" style="border-color:rgba(255,255,255,.1)!important;">
+      <div class="num" style="color:#60a5fa;">{{ severity_counts.medium }}</div>
+      <div class="lbl" style="color:#94a3b8;">Medium</div>
+    </div>
+    <div class="col kpi-mini border-end" style="border-color:rgba(255,255,255,.1)!important;">
+      <div class="num" style="color:#94a3b8;">{{ severity_counts.low }}</div>
+      <div class="lbl" style="color:#94a3b8;">Low</div>
+    </div>
+    <div class="col kpi-mini">
+      <div class="num" style="color:{% if health_score >= 80 %}#4ade80{% elif health_score >= 60 %}#fbbf24{% else %}#f87171{% endif %};">{{ health_score | int }}</div>
+      <div class="lbl" style="color:#94a3b8;">Health Score</div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% if not issues %}
+<div class="text-center py-5 text-muted">
+  <i class="bi bi-clipboard2 fs-1 d-block mb-3 text-muted"></i>
+  <h5 class="fw-semibold">No assessment results yet</h5>
+  <p>Click <strong>Run Assessment</strong> above to analyze this company's QBO books.</p>
+  <form method="post" action="/company/{{ company.realm_id }}/assess">
+    <button class="btn btn-success px-5 fw-semibold">
+      <i class="bi bi-clipboard2-pulse me-2"></i>Run Assessment Now
+    </button>
+  </form>
+</div>
+{% else %}
+
+<!-- Issues by Section -->
+{% set sections = [
+  ('bank_rec',    'bi-bank2',              'Banking & Reconciliation',    'Bank accounts, credit cards, uncleared transactions, reconciliation status'),
+  ('undeposited', 'bi-cash-coin',          'Undeposited Funds',           'Items sitting in Undeposited Funds account'),
+  ('income',      'bi-graph-up-arrow',     'Income & Revenue',            'Uncategorized income, negative revenue, unusual balances'),
+  ('cogs',        'bi-box-seam',           'Cost of Goods Sold',          'COGS classification and balances'),
+  ('expenses',    'bi-receipt',            'Expenses',                    'Uncategorized expenses, Ask My Accountant, personal expenses'),
+  ('assets',      'bi-building',           'Balance Sheet – Assets',      'AR, prepaid, fixed assets, other asset accounts'),
+  ('liabilities', 'bi-credit-card',        'Balance Sheet – Liabilities', 'AP, loans, credit cards, sales tax payable, payroll liabilities'),
+  ('equity',      'bi-pie-chart-fill',     'Equity',                      'Opening Balance Equity, retained earnings'),
+  ('ar',          'bi-people-fill',        'Accounts Receivable',         'Open invoices, aging, unapplied payments, duplicates'),
+  ('ap',          'bi-file-earmark-text',  'Accounts Payable',            'Open bills, aging, unapplied payments, vendor credits'),
+  ('payroll',     'bi-person-badge',       'Payroll',                     'Payroll liabilities, tax accounts, payroll clearing'),
+  ('sales_tax',   'bi-percent',            'Sales Tax',                   'Sales tax payable, filing status, discrepancies'),
+  ('coa',         'bi-list-nested',        'Chart of Accounts',           'Account numbering, types, inactive accounts'),
+  ('general',     'bi-exclamation-circle', 'Other Findings',              'Miscellaneous issues'),
+] %}
+
+{% for cat_key, icon, cat_name, cat_desc in sections %}
+  {% set cat_issues = issues | selectattr('category', 'equalto', cat_key) | list %}
+  {% set open_count = cat_issues | selectattr('status', 'equalto', 'open') | list | length %}
+  {% set total_count = cat_issues | length %}
+
+  {% if total_count > 0 %}
+  <div class="section-card">
+    <div class="section-header" onclick="toggleSection('sec-{{ cat_key }}')">
+      <div class="section-title">
+        <i class="bi {{ icon }} text-primary"></i>
+        <span>{{ cat_name }}</span>
+        <small class="text-muted fw-normal" style="font-size:12px;">{{ cat_desc }}</small>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        {% if open_count > 0 %}
+        <span class="section-count {% if cat_issues | selectattr('severity', 'equalto', 'critical') | list | length > 0 %}count-red{% elif cat_issues | selectattr('severity', 'equalto', 'high') | list | length > 0 %}count-amber{% else %}count-blue{% endif %}">
+          {{ open_count }} open
+        </span>
+        {% else %}
+        <span class="section-count count-green"><i class="bi bi-check-circle me-1"></i>All Reviewed</span>
+        {% endif %}
+        <i class="bi bi-chevron-down text-muted" style="font-size:12px;" id="chev-{{ cat_key }}"></i>
+      </div>
+    </div>
+
+    <div id="sec-{{ cat_key }}">
+      {% for issue in cat_issues %}
+      <div class="issue-row">
+        <div class="d-flex align-items-start gap-3">
+          <span class="sev-pill {{ issue.severity }} mt-1" style="flex-shrink:0;">{{ issue.severity }}</span>
+          <div class="flex-grow-1">
+            <div class="issue-title">{{ issue.title }}</div>
+            <div class="issue-desc">{{ issue.description }}</div>
+
+            {% if issue.risk or issue.recommended_action %}
+            <div class="issue-detail">
+              {% if issue.risk %}
+              <div class="d-flex gap-2 mb-1">
+                <span class="label">⚠ Risk:</span>
+                <span class="text-muted">{{ issue.risk }}</span>
+              </div>
+              {% endif %}
+              {% if issue.recommended_action %}
+              <div class="d-flex gap-2 mb-1">
+                <span class="label">✅ Action:</span>
+                <span class="text-muted">{{ issue.recommended_action }}</span>
+              </div>
+              {% endif %}
+              {% if issue.financial_impact %}
+              <div class="d-flex gap-2 mb-1">
+                <span class="label">💰 Impact:</span>
+                <span class="fw-semibold">{{ issue.financial_impact | currency }}</span>
+              </div>
+              {% endif %}
+              {% if issue.account_name %}
+              <div class="d-flex gap-2">
+                <span class="label">📒 Account:</span>
+                <span class="text-muted font-monospace" style="font-size:11.5px;">{{ issue.account_name }}</span>
+              </div>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+
+          <!-- Status + Actions -->
+          <div class="text-end" style="flex-shrink:0;min-width:120px;">
+            <div class="small status-{{ issue.status }} fw-semibold mb-2">
+              {% if issue.status == 'open' %}⬤ Open
+              {% elif issue.status == 'reviewed' %}⬤ Reviewed
+              {% elif issue.status == 'resolved' %}⬤ Resolved
+              {% else %}⬤ N/A{% endif %}
+            </div>
+            <div class="d-flex flex-column gap-1">
+              {% if issue.status == 'open' %}
+              <form method="post" action="/company/{{ company.realm_id }}/issues/{{ issue.issue_id }}/resolve">
+                <input type="hidden" name="new_status" value="reviewed">
+                <button class="btn btn-outline-warning resolve-btn w-100">Mark Reviewed</button>
+              </form>
+              <form method="post" action="/company/{{ company.realm_id }}/issues/{{ issue.issue_id }}/resolve">
+                <input type="hidden" name="new_status" value="resolved">
+                <button class="btn btn-outline-success resolve-btn w-100">Resolve</button>
+              </form>
+              {% elif issue.status == 'reviewed' %}
+              <form method="post" action="/company/{{ company.realm_id }}/issues/{{ issue.issue_id }}/resolve">
+                <input type="hidden" name="new_status" value="resolved">
+                <button class="btn btn-outline-success resolve-btn w-100">Resolve</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+{% endfor %}
+
+<!-- Catch-all for categories not in our list -->
+{% set known_cats = ['bank_rec','undeposited','income','cogs','expenses','assets','liabilities','equity','ar','ap','payroll','sales_tax','coa','general'] %}
+{% set other_issues = issues | rejectattr('category', 'in', known_cats) | list %}
+{% if other_issues %}
+<div class="section-card">
+  <div class="section-header" onclick="toggleSection('sec-other')">
+    <div class="section-title">
+      <i class="bi bi-three-dots text-primary"></i>
+      <span>Additional Findings</span>
+    </div>
+    <span class="section-count count-blue">{{ other_issues | length }}</span>
+  </div>
+  <div id="sec-other">
+    {% for issue in other_issues %}
+    <div class="issue-row">
+      <div class="d-flex align-items-start gap-3">
+        <span class="sev-pill {{ issue.severity }} mt-1">{{ issue.severity }}</span>
+        <div class="flex-grow-1">
+          <div class="issue-title">{{ issue.title }}</div>
+          <div class="issue-desc">{{ issue.description }}</div>
+          {% if issue.recommended_action %}
+          <div class="issue-detail">
+            <div class="d-flex gap-2">
+              <span class="label">✅ Action:</span>
+              <span class="text-muted">{{ issue.recommended_action }}</span>
+            </div>
+          </div>
+          {% endif %}
+        </div>
+        <div class="text-end" style="flex-shrink:0;min-width:120px;">
+          <div class="small status-{{ issue.status }} fw-semibold mb-2">⬤ {{ issue.status | title }}</div>
+          {% if issue.status == 'open' %}
+          <form method="post" action="/company/{{ company.realm_id }}/issues/{{ issue.issue_id }}/resolve">
+            <input type="hidden" name="new_status" value="reviewed">
+            <button class="btn btn-outline-warning resolve-btn w-100">Mark Reviewed</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% endif %}{# end if issues #}
+{% endif %}{# end if profile #}
+
+</div><!-- /container -->
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleSection(id) {
+  const el = document.getElementById(id);
+  const key = id.replace('sec-', '');
+  const chev = document.getElementById('chev-' + key);
+  if (!el) return;
+  const hidden = el.style.display === 'none';
+  el.style.display = hidden ? '' : 'none';
+  if (chev) chev.style.transform = hidden ? '' : 'rotate(-90deg)';
+}
+// Start all sections expanded
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('[id^="sec-"]').forEach(el => {
+    el.style.display = '';
+  });
+});
+</script>
+{% endblock %}
