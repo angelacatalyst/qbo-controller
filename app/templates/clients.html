@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Clients — AI Bookkeeper{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+  {# Flash messages #}
+  {% if request.query_params.get('added') %}
+  <div class="alert alert-success alert-dismissible fade show" role="alert">
+    <i class="bi bi-check-circle-fill me-2"></i>Client added successfully.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('error') %}
+  <div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-2"></i>{{ request.query_params.get('error') }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+
+  {# Header #}
+  <div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+      <h2 class="fw-bold mb-0" style="color:#1a1a2e;">
+        <i class="bi bi-people-fill me-2" style="color:#6366f1;"></i>Client Portfolio
+      </h2>
+      <p class="text-muted mb-0 mt-1">Select a client to open their workspace, or add a new one.</p>
+    </div>
+    <a href="/clients/new" class="btn btn-primary">
+      <i class="bi bi-plus-lg me-1"></i>Add Client
+    </a>
+  </div>
+
+  {# Stats bar #}
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm text-center py-3">
+        <div class="fs-2 fw-bold" style="color:#6366f1;">{{ clients|length }}</div>
+        <div class="text-muted small">Total Clients</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm text-center py-3">
+        <div class="fs-2 fw-bold text-success">{{ connected_count }}</div>
+        <div class="text-muted small">QBO Connected</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm text-center py-3">
+        <div class="fs-2 fw-bold text-warning">{{ pending_work }}</div>
+        <div class="text-muted small">Pending Work Items</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card border-0 shadow-sm text-center py-3">
+        <div class="fs-2 fw-bold" style="color:#10b981;">{{ active_count }}</div>
+        <div class="text-muted small">Active</div>
+      </div>
+    </div>
+  </div>
+
+  {# Client table #}
+  {% if clients %}
+  <div class="card border-0 shadow-sm">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead style="background:#f8f9ff; border-bottom:2px solid #e5e7eb;">
+          <tr>
+            <th class="px-4 py-3 text-muted small fw-semibold" style="letter-spacing:.05em;">CLIENT</th>
+            <th class="px-3 py-3 text-muted small fw-semibold" style="letter-spacing:.05em;">QBO</th>
+            <th class="px-3 py-3 text-muted small fw-semibold d-none d-md-table-cell" style="letter-spacing:.05em;">LAST SYNC</th>
+            <th class="px-3 py-3 text-muted small fw-semibold d-none d-md-table-cell" style="letter-spacing:.05em;">PENDING</th>
+            <th class="px-3 py-3 text-muted small fw-semibold" style="letter-spacing:.05em;">STATUS</th>
+            <th class="px-4 py-3 text-muted small fw-semibold text-end" style="letter-spacing:.05em;">ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in clients %}
+          <tr style="cursor:pointer;" onclick="window.location='{{ row.workspace_url }}'">
+            <td class="px-4 py-3">
+              <div class="d-flex align-items-center gap-3">
+                <div class="rounded-circle d-flex align-items-center justify-content-center fw-bold text-white"
+                     style="width:38px;height:38px;background:linear-gradient(135deg,#6366f1,#8b5cf6);font-size:.9rem;flex-shrink:0;">
+                  {{ row.client.client_name[:1].upper() }}
+                </div>
+                <div>
+                  <div class="fw-semibold" style="color:#1a1a2e;">{{ row.client.client_name }}</div>
+                  {% if row.client.legal_business_name and row.client.legal_business_name != row.client.client_name %}
+                  <div class="text-muted" style="font-size:.8rem;">{{ row.client.legal_business_name }}</div>
+                  {% endif %}
+                  {% if row.client.contact_name %}
+                  <div class="text-muted" style="font-size:.78rem;">{{ row.client.contact_name }}</div>
+                  {% endif %}
+                </div>
+              </div>
+            </td>
+            <td class="px-3 py-3">
+              {% if row.company and row.company.connection_status == 'connected' %}
+              <span class="badge rounded-pill" style="background:#d1fae5;color:#065f46;font-size:.75rem;">
+                <i class="bi bi-check-circle-fill me-1"></i>Connected
+              </span>
+              {% elif row.company %}
+              <span class="badge rounded-pill" style="background:#fee2e2;color:#991b1b;font-size:.75rem;">
+                <i class="bi bi-x-circle-fill me-1"></i>Disconnected
+              </span>
+              {% else %}
+              <span class="badge rounded-pill" style="background:#f3f4f6;color:#6b7280;font-size:.75rem;">
+                <i class="bi bi-dash-circle me-1"></i>Not Connected
+              </span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-3 d-none d-md-table-cell text-muted" style="font-size:.85rem;">
+              {% if row.company and row.company.last_sync %}
+                {{ row.company.last_sync | fmt_date }}
+              {% else %}—{% endif %}
+            </td>
+            <td class="px-3 py-3 d-none d-md-table-cell">
+              {% if row.pending_items > 0 %}
+              <span class="badge rounded-pill bg-warning text-dark">{{ row.pending_items }}</span>
+              {% else %}
+              <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-3">
+              {% if row.client.status == 'active' %}
+              <span class="badge rounded-pill" style="background:#ede9fe;color:#5b21b6;font-size:.75rem;">Active</span>
+              {% elif row.client.status == 'inactive' %}
+              <span class="badge rounded-pill" style="background:#f3f4f6;color:#6b7280;font-size:.75rem;">Inactive</span>
+              {% else %}
+              <span class="badge rounded-pill" style="background:#fef3c7;color:#92400e;font-size:.75rem;">{{ row.client.status|title }}</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3 text-end" onclick="event.stopPropagation();">
+              {% if row.company and row.company.connection_status == 'connected' %}
+              <a href="{{ row.workspace_url }}" class="btn btn-sm btn-primary me-1">
+                <i class="bi bi-folder2-open me-1"></i>Open
+              </a>
+              {% else %}
+              <a href="/clients/{{ row.client.id }}/connect-qbo" class="btn btn-sm btn-outline-primary me-1">
+                <i class="bi bi-plug-fill me-1"></i>Connect QBO
+              </a>
+              {% endif %}
+              <a href="/clients/{{ row.client.id }}/edit" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-pencil"></i>
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  {# Empty state #}
+  <div class="card border-0 shadow-sm text-center py-5">
+    <div class="py-4">
+      <div class="mb-3" style="font-size:3rem;">🤖</div>
+      <h4 class="fw-semibold mb-2">No clients yet</h4>
+      <p class="text-muted mb-4">Add your first client to get started with the AI Bookkeeper.</p>
+      <a href="/clients/new" class="btn btn-primary btn-lg">
+        <i class="bi bi-plus-lg me-2"></i>Add First Client
+      </a>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Legacy companies without client (if any) #}
+  {% if orphan_companies %}
+  <div class="mt-4">
+    <h6 class="text-muted fw-semibold mb-3" style="font-size:.8rem;letter-spacing:.08em;">LEGACY CONNECTIONS (not yet assigned to a client)</h6>
+    <div class="row g-3">
+      {% for co in orphan_companies %}
+      <div class="col-md-4">
+        <div class="card border-0 shadow-sm p-3 d-flex flex-row align-items-center gap-3">
+          <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary text-white fw-bold"
+               style="width:36px;height:36px;flex-shrink:0;font-size:.85rem;">
+            {{ co.company_name[:1].upper() }}
+          </div>
+          <div class="flex-grow-1 min-w-0">
+            <div class="fw-semibold text-truncate">{{ co.company_name }}</div>
+            <div class="small text-muted">{{ co.connection_status }}</div>
+          </div>
+          <a href="/company/{{ co.realm_id }}" class="btn btn-sm btn-outline-primary">Open</a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
