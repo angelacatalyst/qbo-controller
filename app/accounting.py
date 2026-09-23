@@ -369,10 +369,19 @@ def run_accounting_assessment(db: Session, company: Company, profile: CompanyPro
     """
     new_issues = []
 
-    # Count existing issues ONCE (before any new ones are added to the session).
-    # autoflush=False means repeated count() queries won't see newly db.add()-ed
-    # objects, so _make_issue_id would return ISS-0001 every time if called in a
-    # loop → UNIQUE constraint violation on db.commit(). Use a local counter instead.
+    # Clear all existing open issues for this company before re-running the assessment.
+    # This makes the diagnostic tool re-runnable (each run is a fresh snapshot).
+    # Resolved issues (status != 'open') are preserved so history is kept.
+    try:
+        db.query(AccountingIssue).filter(
+            AccountingIssue.realm_id == company.realm_id,
+            AccountingIssue.status == "open",
+        ).delete(synchronize_session=False)
+        db.flush()
+    except Exception:
+        pass  # If delete fails, proceed — the upsert counter below will avoid dupes
+
+    # _base_count is now 0 (open issues just cleared) or the count of non-open issues.
     _base_count = db.query(AccountingIssue).filter_by(realm_id=company.realm_id).count()
 
     def add(category, severity, title, description, recommended_action,
