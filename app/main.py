@@ -400,9 +400,43 @@ def run_assessment(realm_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     return RedirectResponse(
-        url=f"/company/{realm_id}?assessed=1&issues={len(new_issues)}&score={health['score']}",
+        url=f"/company/{realm_id}/assessment?assessed=1&issues={len(new_issues)}&score={health['score']}",
         status_code=302,
     )
+
+
+@app.get("/company/{realm_id}/assessment", response_class=HTMLResponse)
+def assessment_page(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    issues = db.query(AccountingIssue).filter_by(
+        realm_id=realm_id
+    ).order_by(AccountingIssue.created_at.desc()).all()
+
+    severity_counts = {
+        "critical": sum(1 for i in issues if i.severity == "critical"),
+        "high":     sum(1 for i in issues if i.severity == "high"),
+        "medium":   sum(1 for i in issues if i.severity == "medium"),
+        "low":      sum(1 for i in issues if i.severity == "low"),
+    }
+    open_issues = [i for i in issues if i.status == "open"]
+    issues_by_category: dict = {}
+    for issue in open_issues:
+        cat = issue.category or "general"
+        issues_by_category.setdefault(cat, []).append(issue)
+
+    health_score = (profile.health_score or 0) if profile else 0
+    data_as_of = (profile.data_as_of.date() if profile and profile.data_as_of else None)
+
+    return templates.TemplateResponse(request, "assessment.html", {
+        "company": company,
+        "profile": profile,
+        "issues": open_issues,
+        "issues_by_category": issues_by_category,
+        "severity_counts": severity_counts,
+        "health_score": health_score,
+        "data_as_of": data_as_of,
+    })
 
 
 @app.get("/company/{realm_id}/issues", response_class=HTMLResponse)
@@ -919,10 +953,10 @@ def run_categorize(
     if not profile:
         raise HTTPException(status_code=400, detail="Sync QBO data first (no profile found)")
 
-    result = run_categorization(db, company, profile, lookback_days=lookback_days)
+    proposals = run_categorization(db, company, profile, lookback_days=lookback_days)
     db.commit()
     return RedirectResponse(
-        url=f"/company/{realm_id}/bookkeeping?saved=Categorization+run:+{result.get('proposed', 0)}+proposals+created",
+        url=f"/company/{realm_id}/bookkeeping?saved=Categorization+run:+{len(proposals)}+proposals+created",
         status_code=302,
     )
 
@@ -1015,10 +1049,10 @@ def run_ar_match(
     if not profile:
         raise HTTPException(status_code=400, detail="Sync QBO data first (no profile found)")
 
-    result = run_ar_matching(db, company, profile, lookback_days=lookback_days)
+    proposals = run_ar_matching(db, company, profile, lookback_days=lookback_days)
     db.commit()
     return RedirectResponse(
-        url=f"/company/{realm_id}/ar-matching?saved=AR+Match+run:+{result.get('proposed', 0)}+proposals",
+        url=f"/company/{realm_id}/ar-matching?saved=AR+Match+run:+{len(proposals)}+proposals",
         status_code=302,
     )
 
@@ -1081,12 +1115,11 @@ def bank_rec_page(realm_id: str, request: Request, db: Session = Depends(get_db)
 
     # Pull list of bank/credit-card accounts from profile CoA if available
     accounts = []
-    if profile and profile.chart_of_accounts_data:
-        coa = profile.chart_of_accounts_data.get("QueryResponse", {}).get("Account", [])
+    if profile and profile.chart_of_accounts:
         accounts = [
-            a for a in coa
-            if a.get("AccountType") in ("Bank", "Credit Card")
-            and a.get("Active", True)
+            a for a in profile.chart_of_accounts
+            if a.get("type") in ("Bank", "Credit Card")
+            and a.get("active", True)
         ]
 
     return templates.TemplateResponse(request, "bank_rec.html", {
@@ -1121,12 +1154,11 @@ def run_bank_rec(
     )
 
     accounts = []
-    if profile.chart_of_accounts_data:
-        coa = profile.chart_of_accounts_data.get("QueryResponse", {}).get("Account", [])
+    if profile.chart_of_accounts:
         accounts = [
-            a for a in coa
-            if a.get("AccountType") in ("Bank", "Credit Card")
-            and a.get("Active", True)
+            a for a in profile.chart_of_accounts
+            if a.get("type") in ("Bank", "Credit Card")
+            and a.get("active", True)
         ]
 
     return templates.TemplateResponse(request, "bank_rec.html", {
