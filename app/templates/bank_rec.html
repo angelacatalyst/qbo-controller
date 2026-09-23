@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}Bank Reconciliation — {{ company.company_name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+  .rec-table th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#64748b; }
+  .rec-table td { font-size:13px; vertical-align:middle; }
+  .status-matched   { color:#16a34a; font-weight:600; }
+  .status-unmatched { color:#dc2626; font-weight:600; }
+  .diff-ok  { background:#dcfce7; color:#166534; border-radius:8px; padding:6px 14px; font-weight:700; }
+  .diff-bad { background:#fee2e2; color:#991b1b; border-radius:8px; padding:6px 14px; font-weight:700; }
+  .section-header { font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:#64748b; margin:0 0 10px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="topbar">
+  <div class="company-context">
+    <strong>{{ company.company_name }}</strong>
+    <span class="realm-badge">{{ company.realm_id }}</span>
+    <span class="text-muted" style="font-size:12px;">/ Bank Reconciliation</span>
+  </div>
+</div>
+
+<div class="container-fluid p-4">
+
+  {% if saved %}
+  <div class="alert alert-success alert-dismissible d-flex align-items-center gap-2 mb-3">
+    <i class="bi bi-check-circle-fill"></i> {{ saved }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+
+  <div class="row g-4">
+
+    <!-- Left: Setup form -->
+    <div class="col-md-4 col-lg-3">
+      <div class="card h-auto" style="border:1px solid #e2e8f0; border-radius:12px;">
+        <div class="card-header bg-white fw-bold py-3">
+          <i class="bi bi-bank2 me-2 text-primary"></i>Reconciliation Setup
+        </div>
+        <div class="card-body">
+          <form method="post" action="/company/{{ company.realm_id }}/bank-rec">
+            <div class="mb-3">
+              <label class="form-label fw-medium" style="font-size:13px;">Bank / Credit Card Account</label>
+              <select name="account_id" class="form-select form-select-sm" required>
+                <option value="">Select account…</option>
+                {% for acct in accounts %}
+                <option value="{{ acct.Id }}"
+                  {% if selected_account_id == acct.Id %}selected{% endif %}
+                  data-name="{{ acct.Name }}">
+                  {{ acct.Name }} ({{ acct.AccountType }})
+                </option>
+                {% endfor %}
+              </select>
+              <input type="hidden" name="account_name" id="account_name_hidden">
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-medium" style="font-size:13px;">Statement End Date</label>
+              <input type="date" name="statement_end_date" class="form-control form-control-sm"
+                value="{{ statement_end_date or '' }}" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-medium" style="font-size:13px;">Statement Ending Balance ($)</label>
+              <input type="number" name="statement_ending_balance" class="form-control form-control-sm"
+                step="0.01" value="{{ statement_ending_balance or '' }}"
+                placeholder="0.00" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">
+              <i class="bi bi-calculator me-1"></i>Run Reconciliation
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {% if not accounts %}
+      <div class="alert alert-warning mt-3" style="font-size:13px;">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        No bank accounts found. Sync QBO data first to load the chart of accounts.
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Right: Results -->
+    <div class="col-md-8 col-lg-9">
+      {% if result %}
+
+      <!-- Summary row -->
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">STATEMENT BALANCE</div>
+            <div class="kpi-value">{{ result.statement_ending_balance | currency }}</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">QBO BOOK BALANCE</div>
+            <div class="kpi-value">{{ result.qbo_ending_balance | currency }}</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">DIFFERENCE</div>
+            <div class="kpi-value {% if result.difference == 0 %}text-success{% else %}text-danger{% endif %}">
+              {{ result.difference | currency }}
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">STATUS</div>
+            <div class="kpi-value" style="font-size:18px;">
+              {% if result.status == 'reconciled' %}
+              <span class="text-success"><i class="bi bi-check-circle-fill"></i> Reconciled</span>
+              {% elif result.status == 'pending_review' %}
+              <span class="text-warning"><i class="bi bi-clock-fill"></i> Differences Found</span>
+              {% else %}
+              <span class="text-danger"><i class="bi bi-x-circle-fill"></i> Not Reconciled</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Matched items -->
+      {% if result.matched_items %}
+      <div class="mb-4">
+        <p class="section-header"><i class="bi bi-check-circle text-success me-1"></i>Matched ({{ result.matched_items | length }})</p>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover rec-table mb-0">
+            <thead class="table-light">
+              <tr><th>Date</th><th>Description</th><th>QBO Amount</th><th>Statement Amount</th></tr>
+            </thead>
+            <tbody>
+              {% for item in result.matched_items %}
+              <tr>
+                <td>{{ item.date | fmt_date }}</td>
+                <td>{{ item.description or "—" }}</td>
+                <td>{{ item.qbo_amount | currency }}</td>
+                <td>{{ item.statement_amount | currency }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Unmatched QBO -->
+      {% if result.unmatched_qbo %}
+      <div class="mb-4">
+        <p class="section-header text-danger"><i class="bi bi-exclamation-circle me-1"></i>In QBO but not on statement ({{ result.unmatched_qbo | length }})</p>
+        <div class="table-responsive">
+          <table class="table table-sm rec-table mb-0">
+            <thead class="table-light">
+              <tr><th>Date</th><th>Description</th><th>Amount</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              {% for item in result.unmatched_qbo %}
+              <tr>
+                <td>{{ item.date | fmt_date }}</td>
+                <td>{{ item.description or "—" }}</td>
+                <td class="text-danger fw-medium">{{ item.amount | currency }}</td>
+                <td class="text-muted" style="font-size:12px;">Outstanding / in transit?</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Unmatched Statement -->
+      {% if result.unmatched_statement %}
+      <div class="mb-4">
+        <p class="section-header text-warning"><i class="bi bi-exclamation-triangle me-1"></i>On statement but not in QBO ({{ result.unmatched_statement | length }})</p>
+        <div class="table-responsive">
+          <table class="table table-sm rec-table mb-0">
+            <thead class="table-light">
+              <tr><th>Date</th><th>Description</th><th>Amount</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              {% for item in result.unmatched_statement %}
+              <tr>
+                <td>{{ item.date | fmt_date }}</td>
+                <td>{{ item.description or "—" }}</td>
+                <td class="text-warning fw-medium">{{ item.amount | currency }}</td>
+                <td class="text-muted" style="font-size:12px;">Missing from QBO — entry needed?</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Adjustments needed -->
+      {% if result.adjustments_needed %}
+      <div class="alert alert-warning">
+        <strong><i class="bi bi-wrench me-1"></i>Adjustments Needed:</strong>
+        <ul class="mb-0 mt-2">
+          {% for adj in result.adjustments_needed %}
+          <li>{{ adj }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% else %}
+      <!-- No result yet -->
+      <div class="d-flex align-items-center justify-content-center h-100" style="min-height:300px;">
+        <div class="text-center text-muted">
+          <i class="bi bi-bank2" style="font-size:48px; opacity:.3;"></i>
+          <p class="mt-3">Select an account and enter statement details to run the reconciliation.</p>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+
+<script>
+// Sync account name hidden field
+document.querySelector('[name="account_id"]')?.addEventListener('change', function() {
+  const opt = this.options[this.selectedIndex];
+  document.getElementById('account_name_hidden').value = opt.dataset.name || opt.text;
+});
+</script>
+{% endblock %}
