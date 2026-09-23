@@ -40,11 +40,21 @@
           </small>
         </div>
 
+        {% if client %}
+        <div class="alert alert-info d-flex align-items-center gap-2 mb-3 py-2">
+          <i class="bi bi-person-circle" style="color:#6366f1;"></i>
+          <div class="small">Connecting QBO for client: <strong>{{ client.client_name }}</strong></div>
+        </div>
+        {% endif %}
         <form method="post" action="/qbo/connect">
+          {% if client %}
+          <input type="hidden" name="client_id" value="{{ client.id }}">
+          {% endif %}
           <div class="mb-4">
             <label class="form-label fw-semibold">Company Display Name</label>
             <input type="text" name="company_name" class="form-control form-control-lg"
-                   placeholder="e.g. Affordable Metal Inc." required>
+                   placeholder="e.g. Affordable Metal Inc." required
+                   value="{{ prefill_name or '' }}">
             <div class="form-text">This is just the display name. The actual company name will be pulled from QBO after authorization.</div>
           </div>
 
