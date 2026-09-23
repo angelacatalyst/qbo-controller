@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}AR Matching — {{ company.company_name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+  .conf-high   { color: #16a34a; font-weight: 600; }
+  .conf-medium { color: #d97706; font-weight: 600; }
+  .conf-low    { color: #dc2626; font-weight: 600; }
+  .status-pending  { background:#dbeafe; color:#1e40af; }
+  .status-approved { background:#dcfce7; color:#166534; }
+  .status-applied  { background:#f0fdf4; color:#15803d; }
+  .status-rejected { background:#fee2e2; color:#991b1b; }
+  .status-badge { padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  .match-card { border:1px solid #e2e8f0; border-radius:10px; padding:14px 18px; background:#fff; margin-bottom:10px; }
+  .match-card:hover { border-color:#93c5fd; }
+  .diff-zero { color:#16a34a; }
+  .diff-nonzero { color:#d97706; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="topbar">
+  <div class="company-context">
+    <strong>{{ company.company_name }}</strong>
+    <span class="realm-badge">{{ company.realm_id }}</span>
+    <span class="text-muted" style="font-size:12px;">/ AR Matching</span>
+  </div>
+</div>
+
+<div class="container-fluid p-4">
+
+  {% if saved %}
+  <div class="alert alert-success alert-dismissible d-flex align-items-center gap-2 mb-3" role="alert">
+    <i class="bi bi-check-circle-fill"></i> {{ saved }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endif %}
+
+  <!-- KPIs -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-3">
+      <div class="kpi-card">
+        <div class="kpi-label">PENDING REVIEW</div>
+        <div class="kpi-value text-warning">{{ pending | length }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="kpi-card">
+        <div class="kpi-label">APPROVED</div>
+        <div class="kpi-value text-success">{{ approved | length }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="kpi-card">
+        <div class="kpi-label">APPLIED TO QBO</div>
+        <div class="kpi-value text-primary">{{ applied | length }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="kpi-card">
+        <div class="kpi-label">TOTAL MATCH PROPOSALS</div>
+        <div class="kpi-value">{{ total }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Run Engine -->
+  <div class="d-flex gap-3 align-items-center mb-4">
+    <form method="post" action="/company/{{ company.realm_id }}/ar-match" class="d-flex align-items-center gap-2">
+      <label class="text-muted" style="font-size:13px;">Look back</label>
+      <select name="lookback_days" class="form-select form-select-sm" style="width:100px;">
+        <option value="90">90 days</option>
+        <option value="180" selected>180 days</option>
+        <option value="365">365 days</option>
+      </select>
+      <button class="btn btn-primary btn-sm">
+        <i class="bi bi-search"></i> Run AR Matching Engine
+      </button>
+    </form>
+    <span class="text-muted" style="font-size:12px;">
+      Matches open invoices to unapplied payments by customer, amount, and date.
+      All proposals require approval before any QBO write.
+    </span>
+  </div>
+
+  <!-- Pending proposals -->
+  {% if pending %}
+  <h6 class="fw-bold mb-3"><i class="bi bi-clock text-warning me-2"></i>Pending Review ({{ pending | length }})</h6>
+  {% for m in pending %}
+  <div class="match-card" id="match-{{ m.id }}">
+    <div class="row align-items-center">
+      <div class="col-md-4">
+        <div class="fw-bold text-muted" style="font-size:10px; letter-spacing:.05em;">INVOICE</div>
+        <div class="fw-medium">{{ m.invoice_number or m.invoice_id }}</div>
+        <div style="font-size:12px; color:#64748b;">{{ m.customer_name }}</div>
+        <div style="font-size:12px;">
+          Due: {{ m.invoice_due_date | fmt_date }} &nbsp;|&nbsp;
+          Balance: <strong>{{ m.invoice_balance | currency }}</strong>
+        </div>
+      </div>
+      <div class="col-md-1 text-center text-muted fs-4">
+        <i class="bi bi-arrow-left-right"></i>
+      </div>
+      <div class="col-md-4">
+        <div class="fw-bold text-muted" style="font-size:10px; letter-spacing:.05em;">PAYMENT</div>
+        <div class="fw-medium">{{ m.payment_date | fmt_date }}</div>
+        <div style="font-size:12px; color:#64748b;">{{ m.payment_method or "—" }}</div>
+        <div style="font-size:12px;">
+          Amount: <strong>{{ m.payment_amount | currency }}</strong>
+          {% if m.payment_memo %}&nbsp;|&nbsp;{{ m.payment_memo[:40] }}{% endif %}
+        </div>
+      </div>
+      <div class="col-md-3 text-end">
+        <div class="mb-1">
+          Match: <strong>{{ m.match_amount | currency }}</strong>
+          {% if m.amount_difference is not none and m.amount_difference != 0 %}
+          <span class="diff-nonzero ms-1">(diff: {{ m.amount_difference | currency }})</span>
+          {% else %}
+          <span class="diff-zero ms-1"><i class="bi bi-check-circle-fill"></i> Exact</span>
+          {% endif %}
+        </div>
+        <div class="mb-2">
+          Confidence: <span class="conf-{{ m.match_confidence }}">{{ m.match_confidence | upper }}</span>
+        </div>
+        <div class="d-flex gap-2 justify-content-end">
+          <button class="btn btn-success btn-sm" onclick="approveMatch({{ m.id }})">
+            <i class="bi bi-check"></i> Approve
+          </button>
+          <button class="btn btn-outline-danger btn-sm" onclick="rejectMatch({{ m.id }})">
+            <i class="bi bi-x"></i>
+          </button>
+        </div>
+        {% if m.match_reason %}
+        <div class="text-muted mt-1" style="font-size:11px;">{{ m.match_reason }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="alert alert-light border mb-4">
+    <i class="bi bi-inbox me-2 text-muted"></i>No pending AR match proposals.
+    Run the AR matching engine to find open invoices with available payments.
+  </div>
+  {% endif %}
+
+  <!-- Approved — ready to apply -->
+  {% if approved %}
+  <h6 class="fw-bold mb-3 mt-4"><i class="bi bi-check-circle text-success me-2"></i>Approved — Ready to Apply ({{ approved | length }})</h6>
+  <div class="table-responsive mb-4">
+    <table class="table table-hover">
+      <thead class="table-light">
+        <tr>
+          <th>Invoice</th>
+          <th>Customer</th>
+          <th>Invoice Balance</th>
+          <th>Match Amount</th>
+          <th>Confidence</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in approved %}
+        <tr id="match-{{ m.id }}">
+          <td>{{ m.invoice_number or m.invoice_id }}</td>
+          <td>{{ m.customer_name }}</td>
+          <td>{{ m.invoice_balance | currency }}</td>
+          <td class="fw-bold">{{ m.match_amount | currency }}</td>
+          <td><span class="conf-{{ m.match_confidence }}">{{ m.match_confidence | upper }}</span></td>
+          <td>
+            <button class="btn btn-success btn-sm" onclick="applyMatch({{ m.id }})">
+              <i class="bi bi-cloud-upload me-1"></i>Apply to QBO
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- History -->
+  {% if applied or rejected %}
+  <button class="btn btn-link btn-sm text-muted p-0" data-bs-toggle="collapse" data-bs-target="#arHistory">
+    <i class="bi bi-chevron-down me-1"></i>Show history ({{ applied | length }} applied, {{ rejected | length }} rejected)
+  </button>
+  <div class="collapse mt-2" id="arHistory">
+    <table class="table table-sm table-bordered" style="font-size:12px;">
+      <thead class="table-light">
+        <tr><th>Invoice</th><th>Customer</th><th>Match Amount</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for m in (applied + rejected) %}
+        <tr>
+          <td>{{ m.invoice_number or m.invoice_id }}</td>
+          <td>{{ m.customer_name }}</td>
+          <td>{{ m.match_amount | currency }}</td>
+          <td><span class="status-badge status-{{ m.status }}">{{ m.status | upper }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+const realmId = "{{ company.realm_id }}";
+
+async function approveMatch(id) {
+  const r = await fetch(`/company/${realmId}/ar-match/${id}/approve`, {method:'POST'});
+  if (r.ok) location.reload();
+  else alert('Error approving match');
+}
+
+async function rejectMatch(id) {
+  const reason = prompt('Rejection reason (optional):') || '';
+  const fd = new FormData();
+  fd.append('reason', reason);
+  const r = await fetch(`/company/${realmId}/ar-match/${id}/reject`, {method:'POST', body:fd});
+  if (r.ok) location.reload();
+  else alert('Error rejecting match');
+}
+
+async function applyMatch(id) {
+  if (!confirm('Apply this AR match to QBO? This will link the payment to the invoice.')) return;
+  const r = await fetch(`/company/${realmId}/ar-match/${id}/apply`, {method:'POST'});
+  if (r.ok) location.reload();
+  else {
+    const data = await r.json().catch(() => ({}));
+    alert('Error: ' + (data.detail || r.status));
+  }
+}
+</script>
+{% endblock %}
