@@ -18,10 +18,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import (
-    AccountingIssue, ChangeLog, Company, CompanyProfile,
+    AccountingIssue, ChangeLog, Client, Company, CompanyProfile,
     MonthEndClose, ProposedJournalEntry, SyncHistory,
     ProposedCategorization, ProposedARMatch, RestaurantSalesData,
-    ExternalCredentials,
+    ExternalCredentials, WorkItem,
     _now, get_db, init_db
 )
 from app.security import decrypt_token, encrypt_token
@@ -38,6 +38,7 @@ from app.accounting import (
 from app.bookkeeping import (
     run_categorization, run_ar_matching, run_bank_reconciliation,
     apply_categorization, apply_ar_match,
+    run_categorization_v2, execute_work_item,
 )
 from app.restaurant import (
     fetch_square_sales_for_date, generate_daily_sales_je, save_platform_sales,
@@ -128,6 +129,7 @@ templates.env.filters["currency"] = fmt_currency
 templates.env.filters["fmt_date"] = fmt_date
 templates.env.filters["severity_badge"] = severity_badge
 templates.env.filters["tojson"] = lambda v, indent=None: _json.dumps(v, indent=indent, default=str)
+templates.env.filters["from_json"] = lambda v: _json.loads(v) if v else {}
 
 
 # ─── Helpers ──────────────────────────────────────────────────
@@ -147,14 +149,155 @@ def get_profile(db: Session, realm_id: str) -> Optional[CompanyProfile]:
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
-    companies = db.query(Company).order_by(Company.company_name).all()
-    portfolio = get_portfolio_summary(db, companies)
-    return templates.TemplateResponse(request, "dashboard.html", {
-        "portfolio": portfolio,
-        "total_companies": len(companies),
-        "connected": sum(1 for c in companies if c.connection_status == "connected"),
-        "qbo_environment": settings.QBO_ENVIRONMENT,
+    return RedirectResponse(url="/clients", status_code=302)
+
+
+# ─── CLIENT MANAGEMENT ────────────────────────────────────────
+
+@app.get("/clients", response_class=HTMLResponse)
+def list_clients(request: Request, db: Session = Depends(get_db)):
+    clients_db = db.query(Client).filter(Client.status != "deleted").order_by(Client.client_name).all()
+
+    # Build rows with associated company info
+    rows = []
+    for client in clients_db:
+        # Get all companies associated with this client
+        companies_for_client = db.query(Company).filter(Company.client_id == client.id).all()
+        # Pick the first connected one, or just first
+        company = next((c for c in companies_for_client if c.connection_status == "connected"), None)
+        if not company and companies_for_client:
+            company = companies_for_client[0]
+
+        pending_items = 0
+        workspace_url = f"/clients/{client.id}"
+        if company:
+            pending_items = db.query(WorkItem).filter(
+                WorkItem.realm_id == company.realm_id,
+                WorkItem.status == "pending",
+            ).count()
+            workspace_url = f"/company/{company.realm_id}"
+
+        rows.append({
+            "client": client,
+            "company": company,
+            "pending_items": pending_items,
+            "workspace_url": workspace_url,
+        })
+
+    # Orphan companies (no client_id)
+    orphan_companies = db.query(Company).filter(
+        (Company.client_id == None) | (Company.client_id == "")  # noqa: E711
+    ).all()
+
+    connected_count = sum(1 for r in rows if r["company"] and r["company"].connection_status == "connected")
+    active_count = sum(1 for r in rows if r["client"].status == "active")
+    pending_work = sum(r["pending_items"] for r in rows)
+
+    return templates.TemplateResponse(request, "clients.html", {
+        "clients": rows,
+        "orphan_companies": orphan_companies,
+        "connected_count": connected_count,
+        "active_count": active_count,
+        "pending_work": pending_work,
+    })
+
+
+@app.get("/clients/new", response_class=HTMLResponse)
+def new_client_form(request: Request):
+    return templates.TemplateResponse(request, "add_client.html", {"client": None, "error": None})
+
+
+@app.post("/clients/new")
+def create_client(
+    request: Request,
+    client_name: str = Form(...),
+    legal_business_name: str = Form(default=""),
+    contact_name: str = Form(default=""),
+    email: str = Form(default=""),
+    phone: str = Form(default=""),
+    notes: str = Form(default=""),
+    db: Session = Depends(get_db),
+):
+    if not client_name.strip():
+        return templates.TemplateResponse(request, "add_client.html", {
+            "client": None,
+            "error": "Client name is required.",
+        })
+    client = Client(
+        client_name=client_name.strip(),
+        legal_business_name=legal_business_name.strip() or None,
+        contact_name=contact_name.strip() or None,
+        email=email.strip() or None,
+        phone=phone.strip() or None,
+        notes=notes.strip() or None,
+        status="active",
+    )
+    db.add(client)
+    db.commit()
+    return RedirectResponse(url=f"/clients?added=1", status_code=302)
+
+
+@app.get("/clients/{client_id}", response_class=HTMLResponse)
+def client_detail(client_id: str, request: Request, db: Session = Depends(get_db)):
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    companies = db.query(Company).filter_by(client_id=client_id).all()
+    if companies and companies[0].connection_status == "connected":
+        return RedirectResponse(url=f"/company/{companies[0].realm_id}", status_code=302)
+    return templates.TemplateResponse(request, "add_client.html", {
+        "client": client,
+        "error": None,
+        "companies": companies,
+    })
+
+
+@app.get("/clients/{client_id}/edit", response_class=HTMLResponse)
+def edit_client_form(client_id: str, request: Request, db: Session = Depends(get_db)):
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return templates.TemplateResponse(request, "add_client.html", {"client": client, "error": None})
+
+
+@app.post("/clients/{client_id}/edit")
+def edit_client(
+    client_id: str,
+    request: Request,
+    client_name: str = Form(...),
+    legal_business_name: str = Form(default=""),
+    contact_name: str = Form(default=""),
+    email: str = Form(default=""),
+    phone: str = Form(default=""),
+    notes: str = Form(default=""),
+    status: str = Form(default="active"),
+    db: Session = Depends(get_db),
+):
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    client.client_name = client_name.strip()
+    client.legal_business_name = legal_business_name.strip() or None
+    client.contact_name = contact_name.strip() or None
+    client.email = email.strip() or None
+    client.phone = phone.strip() or None
+    client.notes = notes.strip() or None
+    client.status = status
+    db.commit()
+    return RedirectResponse(url="/clients", status_code=302)
+
+
+@app.get("/clients/{client_id}/connect-qbo", response_class=HTMLResponse)
+def connect_qbo_for_client(client_id: str, request: Request, db: Session = Depends(get_db)):
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return templates.TemplateResponse(request, "connect.html", {
         "app_name": settings.APP_NAME,
+        "environment": settings.QBO_ENVIRONMENT,
+        "has_credentials": bool(settings.QBO_CLIENT_ID and settings.QBO_CLIENT_SECRET),
+        "client": client,
+        "prefill_name": client.client_name,
     })
 
 
@@ -199,6 +342,18 @@ def company_workspace(realm_id: str, request: Request, db: Session = Depends(get
         "low": sum(1 for i in issues if i.severity == "low"),
     }
 
+    # Work queue counts for sidebar badge
+    wq_items = db.query(WorkItem).filter(
+        WorkItem.realm_id == realm_id, WorkItem.status == "pending"
+    ).all()
+    work_queue_counts = {
+        "total": len(wq_items),
+        "human": sum(1 for wi in wq_items if (wi.autonomy_level or 3) == 3),
+        "individual": sum(1 for wi in wq_items if (wi.autonomy_level or 3) == 2),
+        "batch": sum(1 for wi in wq_items if (wi.autonomy_level or 3) == 1),
+        "auto": sum(1 for wi in wq_items if (wi.autonomy_level or 3) == 0),
+    }
+
     return templates.TemplateResponse(request, "company.html", {
         "company": company,
         "profile": profile,
@@ -212,6 +367,7 @@ def company_workspace(realm_id: str, request: Request, db: Session = Depends(get
         "pl": pl,
         "ar": ar,
         "ap": ap,
+        "work_queue_counts": work_queue_counts,
         "app_name": settings.APP_NAME,
         "data_period_start": datetime.now().strftime("%Y-01-01"),
         "data_period_end": datetime.now().strftime("%Y-%m-%d"),
@@ -230,9 +386,17 @@ def qbo_connect_form(request: Request):
 
 
 @app.post("/qbo/connect")
-def qbo_initiate_oauth(request: Request, company_name: str = Form(...)):
+def qbo_initiate_oauth(
+    request: Request,
+    company_name: str = Form(...),
+    client_id: str = Form(default=""),
+):
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = {"company_name": company_name, "created_at": datetime.utcnow()}
+    _oauth_states[state] = {
+        "company_name": company_name,
+        "client_id": client_id.strip() or None,
+        "created_at": datetime.utcnow(),
+    }
     auth_url = build_auth_url(state)
     return RedirectResponse(url=auth_url, status_code=302)
 
@@ -254,6 +418,7 @@ def qbo_oauth_callback(
 
     state_data = _oauth_states.pop(state)
     company_name = state_data.get("company_name", "Unknown Company")
+    client_id_from_state = state_data.get("client_id")
 
     if not code or not realmId:
         raise HTTPException(status_code=400, detail="Missing authorization code or realm ID from QBO")
@@ -275,6 +440,9 @@ def qbo_oauth_callback(
         existing.token_expires_at = expires_at
         existing.connection_status = "connected"
         existing.qbo_environment = settings.QBO_ENVIRONMENT
+        # Associate with client if coming from client flow and not yet associated
+        if client_id_from_state and not existing.client_id:
+            existing.client_id = client_id_from_state
         db.commit()
         company = existing
     else:
@@ -287,6 +455,7 @@ def qbo_oauth_callback(
             refresh_token_enc=encrypt_token(tokens["refresh_token"]),
             token_expires_at=expires_at,
             connection_status="connected",
+            client_id=client_id_from_state,
         )
         db.add(company)
         db.commit()
@@ -310,7 +479,8 @@ def qbo_oauth_callback(
     db.add(log)
     db.commit()
 
-    return RedirectResponse(url=f"/company/{realmId}?connected=1", status_code=302)
+    redirect_url = f"/company/{realmId}?connected=1"
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @app.post("/qbo/disconnect/{realm_id}")
@@ -912,6 +1082,43 @@ def company_summary_api(realm_id: str, db: Session = Depends(get_db)):
     }
 
 
+# ─── AI WORK QUEUE ───────────────────────────────────────────────
+
+@app.get("/company/{realm_id}/work-queue", response_class=HTMLResponse)
+def work_queue(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+
+    pending_items = (
+        db.query(WorkItem)
+        .filter(WorkItem.realm_id == realm_id, WorkItem.status == "pending")
+        .order_by(WorkItem.autonomy_level.desc(), WorkItem.created_at.desc())
+        .all()
+    )
+
+    # Group by autonomy level
+    items_by_level: dict = {0: [], 1: [], 2: [], 3: []}
+    work_type_counts: dict = {}
+    for wi in pending_items:
+        level = wi.autonomy_level if wi.autonomy_level is not None else 3
+        items_by_level.setdefault(level, []).append(wi)
+        work_type_counts[wi.work_type] = work_type_counts.get(wi.work_type, 0) + 1
+
+    counts = {
+        "auto": len(items_by_level[0]),
+        "batch": len(items_by_level[1]),
+        "individual": len(items_by_level[2]),
+        "human": len(items_by_level[3]),
+    }
+
+    return templates.TemplateResponse(request, "work_queue.html", {
+        "company": company,
+        "items_by_level": items_by_level,
+        "counts": counts,
+        "work_type_counts": work_type_counts,
+        "total_pending": len(pending_items),
+    })
+
+
 # ════════════════════════════════════════════════════════════════
 # ─── BOOKKEEPING: CATEGORIZATION ────────────────────────────────
 # ════════════════════════════════════════════════════════════════
@@ -921,14 +1128,24 @@ def bookkeeping_dashboard(realm_id: str, request: Request, db: Session = Depends
     company = get_company_or_404(db, realm_id)
     profile = get_profile(db, realm_id)
 
-    cats = db.query(ProposedCategorization).filter_by(
-        realm_id=realm_id
-    ).order_by(ProposedCategorization.created_at.desc()).limit(200).all()
+    work_items = (
+        db.query(WorkItem)
+        .filter(WorkItem.realm_id == realm_id, WorkItem.work_type == "CATEGORIZE")
+        .order_by(WorkItem.created_at.desc())
+        .limit(300)
+        .all()
+    )
 
-    pending = [c for c in cats if c.status == "pending"]
-    approved = [c for c in cats if c.status == "approved"]
-    applied = [c for c in cats if c.status == "applied"]
-    rejected = [c for c in cats if c.status == "rejected"]
+    pending = [wi for wi in work_items if wi.status == "pending"]
+    approved = [wi for wi in work_items if wi.status == "approved"]
+    applied = [wi for wi in work_items if wi.status in ("applied", "executing")]
+    rejected = [wi for wi in work_items if wi.status == "rejected"]
+
+    # Map WorkItem fields to template-compatible names
+    # WorkItem uses proposed_account_name; template uses suggested_account_name
+    for wi in work_items:
+        if not hasattr(wi, "suggested_account_name"):
+            wi.suggested_account_name = wi.proposed_account_name  # type: ignore[attr-defined]
 
     return templates.TemplateResponse(request, "bookkeeping.html", {
         "company": company,
@@ -937,8 +1154,9 @@ def bookkeeping_dashboard(realm_id: str, request: Request, db: Session = Depends
         "approved": approved,
         "applied": applied,
         "rejected": rejected,
-        "total": len(cats),
+        "total": len(work_items),
         "saved": request.query_params.get("saved"),
+        "diagnostic": request.query_params.get("diagnostic"),
     })
 
 
@@ -953,23 +1171,71 @@ def run_categorize(
     if not profile:
         raise HTTPException(status_code=400, detail="Sync QBO data first (no profile found)")
 
-    proposals = run_categorization(db, company, profile, lookback_days=lookback_days)
+    work_items, diagnostic = run_categorization_v2(db, company, profile, lookback_days=lookback_days)
     db.commit()
+
+    # Log run to ChangeLog
+    try:
+        cl = ChangeLog(
+            company_id=company.id,
+            realm_id=realm_id,
+            entity_type="ENGINE",
+            entity_id="categorization_v2",
+            action_type="ENGINE_RUN",
+            description=f"Categorization v2 engine: {diagnostic.get('work_items_created',0)} WorkItems created, {diagnostic.get('uncategorized_count',0)} uncategorized found",
+            new_value=diagnostic,
+        )
+        db.add(cl)
+        db.commit()
+    except Exception:
+        pass
+
+    created = diagnostic.get("work_items_created", len(work_items))
+    uncategorized = diagnostic.get("uncategorized_count", 0)
+    errors = len(diagnostic.get("api_errors", []))
+    breakdown = diagnostic.get("autonomy_breakdown", {})
+
+    summary_parts = [
+        f"Engine run complete",
+        f"{uncategorized} uncategorized found",
+        f"{created} WorkItems created",
+    ]
+    if errors:
+        summary_parts.append(f"{errors} API error(s)")
+    summary = " · ".join(summary_parts)
+
+    import json, urllib.parse
+    diag_json = urllib.parse.quote(json.dumps({
+        "created": created,
+        "uncategorized": uncategorized,
+        "errors": errors,
+        "breakdown": breakdown,
+        "api_errors": diagnostic.get("api_errors", []),
+        "qbo_writes": diagnostic.get("qbo_writes", 0),
+    }))
+
     return RedirectResponse(
-        url=f"/company/{realm_id}/bookkeeping?saved=Categorization+run:+{len(proposals)}+proposals+created",
+        url=f"/company/{realm_id}/bookkeeping?saved={urllib.parse.quote(summary)}&diagnostic={diag_json}",
         status_code=302,
     )
 
 
 @app.post("/company/{realm_id}/categorization/{cat_id}/approve")
-def approve_categorization(realm_id: str, cat_id: int, db: Session = Depends(get_db)):
+def approve_categorization(realm_id: str, cat_id: str, db: Session = Depends(get_db)):
     company = get_company_or_404(db, realm_id)
-    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
-    if not cat:
-        raise HTTPException(status_code=404, detail="Categorization proposal not found")
-    cat.status = "approved"
-    cat.approved_at = _now()
-    cat.approved_by = "controller"
+    wi = db.query(WorkItem).filter(
+        WorkItem.id == cat_id,
+        WorkItem.realm_id == realm_id,
+        WorkItem.work_type == "CATEGORIZE",
+    ).first()
+    if not wi:
+        raise HTTPException(status_code=404, detail="WorkItem not found")
+    if wi.status != "pending":
+        raise HTTPException(status_code=400, detail=f"WorkItem status is '{wi.status}', expected 'pending'")
+    wi.status = "approved"
+    wi.approved_at = _now()
+    wi.approved_by = "controller_ui"
+    wi.updated_at = _now()
     db.commit()
     return JSONResponse({"ok": True, "status": "approved"})
 
@@ -977,35 +1243,68 @@ def approve_categorization(realm_id: str, cat_id: int, db: Session = Depends(get
 @app.post("/company/{realm_id}/categorization/{cat_id}/reject")
 def reject_categorization(
     realm_id: str,
-    cat_id: int,
+    cat_id: str,
     reason: str = Form(""),
     db: Session = Depends(get_db),
 ):
     company = get_company_or_404(db, realm_id)
-    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
-    if not cat:
-        raise HTTPException(status_code=404, detail="Categorization proposal not found")
-    cat.status = "rejected"
-    cat.rejection_reason = reason
+    wi = db.query(WorkItem).filter(
+        WorkItem.id == cat_id,
+        WorkItem.realm_id == realm_id,
+        WorkItem.work_type == "CATEGORIZE",
+    ).first()
+    if not wi:
+        raise HTTPException(status_code=404, detail="WorkItem not found")
+    wi.status = "rejected"
+    wi.rejection_reason = reason
+    wi.updated_at = _now()
     db.commit()
     return JSONResponse({"ok": True, "status": "rejected"})
 
 
 @app.post("/company/{realm_id}/categorization/{cat_id}/apply")
-def apply_categorization_route(realm_id: str, cat_id: int, db: Session = Depends(get_db)):
+def apply_categorization_route(realm_id: str, cat_id: str, db: Session = Depends(get_db)):
+    """Apply an approved WorkItem to QBO. Requires explicit prior approval."""
     company = get_company_or_404(db, realm_id)
-    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
-    if not cat:
-        raise HTTPException(status_code=404, detail="Categorization proposal not found")
-    if cat.status != "approved":
-        raise HTTPException(status_code=400, detail="Proposal must be approved before applying")
+    wi = db.query(WorkItem).filter(
+        WorkItem.id == cat_id,
+        WorkItem.realm_id == realm_id,
+        WorkItem.work_type == "CATEGORIZE",
+    ).first()
+    if not wi:
+        raise HTTPException(status_code=404, detail="WorkItem not found")
+    if wi.status != "approved":
+        raise HTTPException(status_code=400, detail=f"WorkItem must be approved before applying (status={wi.status})")
 
-    result = apply_categorization(db, company, cat)
+    result = execute_work_item(db, company, wi)
     if result.get("success"):
         db.commit()
-        return JSONResponse({"ok": True, "status": "applied"})
+        return JSONResponse({"ok": True, "status": "applied", "message": result.get("message")})
     else:
-        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+        db.commit()  # persist error_message / status reset
+        raise HTTPException(status_code=500, detail=result.get("message", "Unknown error"))
+
+
+@app.post("/company/{realm_id}/work-items/{item_id}/execute")
+def execute_work_item_route(realm_id: str, item_id: str, db: Session = Depends(get_db)):
+    """Execute any approved WorkItem by ID (generic endpoint for future work types)."""
+    company = get_company_or_404(db, realm_id)
+    wi = db.query(WorkItem).filter(
+        WorkItem.id == item_id,
+        WorkItem.realm_id == realm_id,
+    ).first()
+    if not wi:
+        raise HTTPException(status_code=404, detail="WorkItem not found")
+    if wi.status != "approved":
+        raise HTTPException(status_code=400, detail=f"WorkItem not approved (status={wi.status})")
+
+    result = execute_work_item(db, company, wi)
+    if result.get("success"):
+        db.commit()
+        return JSONResponse({"ok": True, "status": "applied", "message": result.get("message")})
+    else:
+        db.commit()
+        raise HTTPException(status_code=500, detail=result.get("message", "Unknown error"))
 
 
 # ════════════════════════════════════════════════════════════════
