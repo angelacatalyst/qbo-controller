@@ -6,14 +6,38 @@
   .conf-high   { color: #16a34a; font-weight: 600; }
   .conf-medium { color: #d97706; font-weight: 600; }
   .conf-low    { color: #dc2626; font-weight: 600; }
-  .status-pending  { background:#dbeafe; color:#1e40af; }
-  .status-approved { background:#dcfce7; color:#166534; }
-  .status-applied  { background:#f0fdf4; color:#15803d; }
-  .status-rejected { background:#fee2e2; color:#991b1b; }
+  .conf-none   { color: #94a3b8; font-weight: 600; }
+  .status-pending   { background:#dbeafe; color:#1e40af; }
+  .status-approved  { background:#dcfce7; color:#166534; }
+  .status-applied   { background:#f0fdf4; color:#15803d; }
+  .status-rejected  { background:#fee2e2; color:#991b1b; }
+  .status-executing { background:#fef9c3; color:#854d0e; }
   .status-badge { padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
   .action-btn { font-size:12px; padding:3px 10px; }
   .proposal-row td { vertical-align:middle; font-size:13px; }
   .acct-arrow { color:#94a3b8; }
+
+  /* Autonomy badges */
+  .auto-0 { background:#dcfce7; color:#14532d; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
+  .auto-1 { background:#dbeafe; color:#1e3a5f; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
+  .auto-2 { background:#fef9c3; color:#78350f; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
+  .auto-3 { background:#fee2e2; color:#7f1d1d; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
+
+  /* Risk badges */
+  .risk-low    { color:#16a34a; font-size:11px; font-weight:600; }
+  .risk-medium { color:#d97706; font-size:11px; font-weight:600; }
+  .risk-high   { color:#dc2626; font-size:11px; font-weight:600; }
+
+  /* Txn type chips */
+  .txn-Purchase     { background:#e0e7ff; color:#3730a3; padding:1px 6px; border-radius:8px; font-size:10px; font-weight:600; }
+  .txn-Check        { background:#f3e8ff; color:#6b21a8; padding:1px 6px; border-radius:8px; font-size:10px; font-weight:600; }
+  .txn-Deposit      { background:#dcfce7; color:#14532d; padding:1px 6px; border-radius:8px; font-size:10px; font-weight:600; }
+  .txn-SalesReceipt { background:#fef9c3; color:#78350f; padding:1px 6px; border-radius:8px; font-size:10px; font-weight:600; }
+
+  /* Diagnostic banner */
+  .diag-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 18px; font-size:13px; }
+  .diag-val  { font-weight:700; font-size:16px; }
+  .diag-err  { color:#dc2626; }
 </style>
 {% endblock %}
 
@@ -35,7 +59,51 @@
   </div>
   {% endif %}
 
-  <!-- Run Engine Card -->
+  <!-- Diagnostic banner (shown after engine run) -->
+  {% if diagnostic %}
+  {% set diag = diagnostic | from_json %}
+  <div class="diag-card mb-4">
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <i class="bi bi-bar-chart-fill text-primary"></i>
+      <strong>Last Engine Run — Diagnostic</strong>
+      <span class="badge bg-success ms-1">QBO Writes: {{ diag.qbo_writes }}</span>
+    </div>
+    <div class="row g-3">
+      <div class="col-auto">
+        <div class="text-muted" style="font-size:11px;">UNCATEGORIZED FOUND</div>
+        <div class="diag-val">{{ diag.uncategorized }}</div>
+      </div>
+      <div class="col-auto">
+        <div class="text-muted" style="font-size:11px;">WORKITEMS CREATED</div>
+        <div class="diag-val text-success">{{ diag.created }}</div>
+      </div>
+      {% if diag.errors %}
+      <div class="col-auto">
+        <div class="text-muted" style="font-size:11px;">API ERRORS</div>
+        <div class="diag-val diag-err">{{ diag.errors }}</div>
+      </div>
+      {% endif %}
+      <div class="col-auto">
+        <div class="text-muted" style="font-size:11px;">AUTONOMY BREAKDOWN</div>
+        <div style="font-size:12px; margin-top:2px;">
+          <span class="auto-1 me-1">BATCH {{ diag.breakdown.BATCH }}</span>
+          <span class="auto-2 me-1">INDIVIDUAL {{ diag.breakdown.INDIVIDUAL }}</span>
+          <span class="auto-3 me-1">HUMAN {{ diag.breakdown.HUMAN_REQUIRED }}</span>
+        </div>
+      </div>
+    </div>
+    {% if diag.api_errors %}
+    <div class="mt-2">
+      <div class="text-muted" style="font-size:11px;">ERRORS</div>
+      {% for err in diag.api_errors %}
+      <div class="diag-err" style="font-size:12px;"><strong>{{ err.type }}:</strong> {{ err.error }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- KPI cards -->
   <div class="row g-3 mb-4">
     <div class="col-md-4">
       <div class="kpi-card h-100">
@@ -81,7 +149,7 @@
   <div class="card mb-4" style="border:1px solid #e2e8f0; border-radius:12px;">
     <div class="card-header bg-white py-3 d-flex align-items-center justify-content-between">
       <span class="fw-bold"><i class="bi bi-clock text-warning me-2"></i>Pending Review ({{ pending | length }})</span>
-      <button class="btn btn-outline-success btn-sm" onclick="approveAll()">
+      <button class="btn btn-outline-success btn-sm" onclick="approveAllHighConf()">
         <i class="bi bi-check-all"></i> Approve All High Confidence
       </button>
     </div>
@@ -90,39 +158,61 @@
         <table class="table table-hover mb-0">
           <thead class="table-light">
             <tr>
-              <th style="width:90px;">Date</th>
+              <th style="width:80px;">Date</th>
+              <th style="width:90px;">Type</th>
               <th>Payee / Memo</th>
-              <th style="width:100px;">Amount</th>
+              <th style="width:90px;">Amount</th>
               <th>Current Account</th>
               <th></th>
               <th>Suggested Account</th>
-              <th style="width:70px;">Conf.</th>
+              <th style="width:60px;">Conf.</th>
+              <th style="width:50px;">Risk</th>
+              <th style="width:90px;">Autonomy</th>
               <th>Reason</th>
-              <th style="width:150px;">Actions</th>
+              <th style="width:130px;">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {% for c in pending %}
-            <tr class="proposal-row" id="row-{{ c.id }}">
-              <td>{{ c.txn_date | fmt_date }}</td>
+            {% for wi in pending %}
+            <tr class="proposal-row" id="row-{{ wi.id }}" data-conf="{{ wi.confidence }}" data-autonomy="{{ wi.autonomy_level }}">
+              <td>{{ wi.txn_date | fmt_date }}</td>
               <td>
-                <div class="fw-medium">{{ c.payee_name or "—" }}</div>
-                {% if c.memo %}<div class="text-muted" style="font-size:11px;">{{ c.memo[:60] }}</div>{% endif %}
+                {% if wi.qbo_txn_type %}
+                <span class="txn-{{ wi.qbo_txn_type }}">{{ wi.qbo_txn_type }}</span>
+                {% else %}—{% endif %}
               </td>
-              <td class="fw-bold">{{ c.amount | currency }}</td>
-              <td class="text-muted">{{ c.current_account_name or "—" }}</td>
+              <td>
+                <div class="fw-medium">{{ wi.payee_name or "—" }}</div>
+                {% if wi.memo %}<div class="text-muted" style="font-size:11px;">{{ wi.memo[:60] }}</div>{% endif %}
+              </td>
+              <td class="fw-bold">{{ wi.amount | currency }}</td>
+              <td class="text-muted">{{ wi.current_account_name or "—" }}</td>
               <td class="acct-arrow">→</td>
-              <td class="fw-medium text-success">{{ c.suggested_account_name or "—" }}</td>
+              <td class="fw-medium text-success">{{ wi.proposed_account_name or "—" }}</td>
               <td>
-                <span class="conf-{{ c.confidence }}">{{ c.confidence | upper }}</span>
+                <span class="conf-{{ wi.confidence or 'none' }}">{{ (wi.confidence or 'none') | upper }}</span>
               </td>
-              <td class="text-muted" style="font-size:12px;">{{ c.reason[:80] if c.reason else "—" }}</td>
+              <td>
+                <span class="risk-{{ wi.risk or 'low' }}">{{ (wi.risk or 'low') | upper }}</span>
+              </td>
+              <td>
+                {% if wi.autonomy_level == 0 %}
+                  <span class="auto-0">AUTO</span>
+                {% elif wi.autonomy_level == 1 %}
+                  <span class="auto-1">BATCH</span>
+                {% elif wi.autonomy_level == 2 %}
+                  <span class="auto-2">INDIVIDUAL</span>
+                {% else %}
+                  <span class="auto-3">HUMAN</span>
+                {% endif %}
+              </td>
+              <td class="text-muted" style="font-size:12px;">{{ wi.reason[:80] if wi.reason else "—" }}</td>
               <td>
                 <div class="d-flex gap-1">
-                  <button class="btn btn-success action-btn" onclick="approveOne({{ c.id }})">
+                  <button class="btn btn-success action-btn" onclick="approveOne('{{ wi.id }}')">
                     <i class="bi bi-check"></i>
                   </button>
-                  <button class="btn btn-outline-danger action-btn" onclick="rejectOne({{ c.id }})">
+                  <button class="btn btn-outline-danger action-btn" onclick="rejectOne('{{ wi.id }}')">
                     <i class="bi bi-x"></i>
                   </button>
                 </div>
@@ -154,27 +244,39 @@
           <thead class="table-light">
             <tr>
               <th>Date</th>
+              <th>Type</th>
               <th>Payee</th>
               <th>Amount</th>
               <th>Current → Suggested</th>
-              <th>Confidence</th>
+              <th>Conf.</th>
+              <th>Risk</th>
+              <th>Autonomy</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody>
-            {% for c in approved %}
-            <tr id="row-{{ c.id }}">
-              <td>{{ c.txn_date | fmt_date }}</td>
-              <td>{{ c.payee_name or "—" }}</td>
-              <td class="fw-bold">{{ c.amount | currency }}</td>
+            {% for wi in approved %}
+            <tr id="row-{{ wi.id }}">
+              <td>{{ wi.txn_date | fmt_date }}</td>
               <td>
-                <span class="text-muted">{{ c.current_account_name or "—" }}</span>
-                <i class="bi bi-arrow-right mx-1 text-muted"></i>
-                <span class="text-success fw-medium">{{ c.suggested_account_name }}</span>
+                {% if wi.qbo_txn_type %}<span class="txn-{{ wi.qbo_txn_type }}">{{ wi.qbo_txn_type }}</span>{% else %}—{% endif %}
               </td>
-              <td><span class="conf-{{ c.confidence }}">{{ c.confidence | upper }}</span></td>
+              <td>{{ wi.payee_name or "—" }}</td>
+              <td class="fw-bold">{{ wi.amount | currency }}</td>
               <td>
-                <button class="btn btn-success action-btn" onclick="applyOne({{ c.id }})">
+                <span class="text-muted">{{ wi.current_account_name or "—" }}</span>
+                <i class="bi bi-arrow-right mx-1 text-muted"></i>
+                <span class="text-success fw-medium">{{ wi.proposed_account_name }}</span>
+              </td>
+              <td><span class="conf-{{ wi.confidence or 'none' }}">{{ (wi.confidence or 'none') | upper }}</span></td>
+              <td><span class="risk-{{ wi.risk or 'low' }}">{{ (wi.risk or 'low') | upper }}</span></td>
+              <td>
+                {% if wi.autonomy_level == 1 %}<span class="auto-1">BATCH</span>
+                {% elif wi.autonomy_level == 2 %}<span class="auto-2">INDIVIDUAL</span>
+                {% else %}<span class="auto-3">HUMAN</span>{% endif %}
+              </td>
+              <td>
+                <button class="btn btn-success action-btn" onclick="applyOne('{{ wi.id }}')">
                   <i class="bi bi-cloud-upload me-1"></i>Apply to QBO
                 </button>
               </td>
@@ -197,16 +299,18 @@
       <div class="table-responsive">
         <table class="table table-sm table-bordered mb-0" style="font-size:12px;">
           <thead class="table-light">
-            <tr><th>Date</th><th>Payee</th><th>Amount</th><th>Suggested Account</th><th>Status</th></tr>
+            <tr><th>Date</th><th>Type</th><th>Payee</th><th>Amount</th><th>Suggested Account</th><th>Status</th><th>Verification</th></tr>
           </thead>
           <tbody>
-            {% for c in (applied + rejected) | sort(attribute='txn_date', reverse=True) %}
+            {% for wi in (applied + rejected) | sort(attribute='txn_date', reverse=True) %}
             <tr>
-              <td>{{ c.txn_date | fmt_date }}</td>
-              <td>{{ c.payee_name or "—" }}</td>
-              <td>{{ c.amount | currency }}</td>
-              <td>{{ c.suggested_account_name }}</td>
-              <td><span class="status-badge status-{{ c.status }}">{{ c.status | upper }}</span></td>
+              <td>{{ wi.txn_date | fmt_date }}</td>
+              <td>{% if wi.qbo_txn_type %}<span class="txn-{{ wi.qbo_txn_type }}">{{ wi.qbo_txn_type }}</span>{% else %}—{% endif %}</td>
+              <td>{{ wi.payee_name or "—" }}</td>
+              <td>{{ wi.amount | currency }}</td>
+              <td>{{ wi.proposed_account_name }}</td>
+              <td><span class="status-badge status-{{ wi.status }}">{{ wi.status | upper }}</span></td>
+              <td>{{ wi.verification_status or "—" }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -228,7 +332,8 @@ async function approveOne(catId) {
     if (row) row.style.opacity = '0.4';
     location.reload();
   } else {
-    alert('Error approving proposal');
+    const data = await r.json().catch(() => ({}));
+    alert('Error approving: ' + (data.detail || r.status));
   }
 }
 
@@ -238,28 +343,35 @@ async function rejectOne(catId) {
   fd.append('reason', reason);
   const r = await fetch(`/company/${realmId}/categorization/${catId}/reject`, {method:'POST', body:fd});
   if (r.ok) location.reload();
-  else alert('Error rejecting proposal');
+  else {
+    const data = await r.json().catch(() => ({}));
+    alert('Error rejecting: ' + (data.detail || r.status));
+  }
 }
 
 async function applyOne(catId) {
-  if (!confirm('Apply this categorization to QBO now?')) return;
+  if (!confirm('Apply this categorization to QBO now? This will write to QuickBooks.')) return;
   const r = await fetch(`/company/${realmId}/categorization/${catId}/apply`, {method:'POST'});
-  if (r.ok) location.reload();
-  else {
+  if (r.ok) {
+    location.reload();
+  } else {
     const data = await r.json().catch(() => ({}));
     alert('Error applying: ' + (data.detail || r.status));
   }
 }
 
-async function approveAll() {
+async function approveAllHighConf() {
   const rows = document.querySelectorAll('[id^="row-"]');
   let count = 0;
   for (const row of rows) {
+    // Only approve HIGH confidence items (data-conf="high")
+    if (row.dataset.conf !== 'high') continue;
     const id = row.id.replace('row-', '');
     const r = await fetch(`/company/${realmId}/categorization/${id}/approve`, {method:'POST'});
     if (r.ok) count++;
   }
   if (count > 0) location.reload();
+  else alert('No high-confidence pending items found.');
 }
 </script>
 {% endblock %}
