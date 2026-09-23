@@ -7,6 +7,7 @@ from datetime import datetime
 
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+import sqlalchemy
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey,
     Integer, String, Text, create_engine, event
@@ -43,6 +44,24 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── Client (pre-QBO entity — one row per bookkeeping client) ──
+class Client(Base):
+    __tablename__ = "clients"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    client_name = Column(String(255), nullable=False)
+    legal_business_name = Column(String(255))
+    contact_name = Column(String(255))
+    email = Column(String(255))
+    phone = Column(String(50))
+    notes = Column(Text)
+    status = Column(String(20), default="active")   # active | inactive | prospect
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    companies = relationship("Company", back_populates="client")
+
+
 # ── Company (one row = one QBO connection) ────────────────────
 class Company(Base):
     __tablename__ = "companies"
@@ -74,7 +93,11 @@ class Company(Base):
     # Company type — used to activate restaurant-specific features
     company_type = Column(String(30), default="standard")   # standard | restaurant
 
+    # Client linkage (nullable — existing companies without a client are still valid)
+    client_id = Column(String(36), ForeignKey("clients.id"), nullable=True, index=True)
+
     # Relationships
+    client = relationship("Client", back_populates="companies")
     profile = relationship("CompanyProfile", back_populates="company", uselist=False,
                            cascade="all, delete-orphan")
     sync_history = relationship("SyncHistory", back_populates="company",
@@ -95,6 +118,10 @@ class Company(Base):
                                     cascade="all, delete-orphan")
     ar_matches = relationship("ProposedARMatch", back_populates="company",
                               cascade="all, delete-orphan")
+    work_items = relationship("WorkItem", back_populates="company",
+                              cascade="all, delete-orphan")
+    company_rules = relationship("CompanyRule", back_populates="company",
+                                 cascade="all, delete-orphan")
 
 
 # ── Company Accounting Profile ────────────────────────────────
@@ -130,6 +157,10 @@ class CompanyProfile(Base):
     controller_notes = Column(Text)            # internal controller notes
     tax_year_end = Column(String(50))          # e.g. "December 31"
     notes = Column(Text)
+
+    # Risk/control boundary — NOT automatic authorization ceiling
+    # WorkItems with amount > materiality_limit require autonomy_level >= 2 (INDIVIDUAL review)
+    materiality_limit = Column(Float, default=2500.0)
 
     # Health score
     health_score = Column(Float)
@@ -503,6 +534,140 @@ class ProposedARMatch(Base):
     company = relationship("Company", back_populates="ar_matches")
 
 
+# ── Work Items (generalized AI action queue) ──────────────────
+class WorkItem(Base):
+    """
+    Generalized proposed action. Every AI-detected work item lives here
+    before it is approved and executed. Phase 1 implements work_type=CATEGORIZE.
+    Extensible to AR_MATCH, BANK_REC, DUPLICATE, MISSING_ENTRY, etc.
+
+    SAFETY INVARIANT: Nothing is written to QBO until status='approved'
+    and execute_work_item() is explicitly called by a controller action.
+    The engine may READ from QBO and CREATE/UPDATE WorkItem records freely.
+    It must NOT write categorization changes to QBO without explicit approval.
+    """
+    __tablename__ = "work_items"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+
+    # Which engine created this and what action it proposes
+    work_type = Column(String(30), nullable=False, default="CATEGORIZE")
+    # Supported: CATEGORIZE | AR_MATCH | BANK_REC | DUPLICATE | MISSING_ENTRY
+
+    # Source transaction (populated for CATEGORIZE work type)
+    qbo_txn_id = Column(String(100))
+    qbo_txn_type = Column(String(50))    # Purchase | Check | Deposit | SalesReceipt
+    txn_date = Column(DateTime)
+    amount = Column(Float)
+    payee_name = Column(String(255))
+    memo = Column(String(500))
+
+    # Current state in QBO
+    current_account_id = Column(String(100))
+    current_account_name = Column(String(255))
+
+    # Proposed new state
+    proposed_account_id = Column(String(100))
+    proposed_account_name = Column(String(255))
+    proposed_account_type = Column(String(50))
+
+    # Four-factor AI assessment
+    confidence = Column(String(10), default="low")   # high | medium | low | none
+    risk = Column(String(10), default="low")          # low | medium | high
+    # 0=AUTO (no human needed)  1=BATCH (approve with others)
+    # 2=INDIVIDUAL (one-by-one) 3=HUMAN_REQUIRED (do not auto-propose)
+    autonomy_level = Column(Integer, default=2)
+    rule_matched = Column(String(255))
+    reason = Column(Text)
+
+    # Status lifecycle:
+    # pending → approved → executing → applied
+    # pending → rejected
+    # (errors during detection are stored in error_message, status stays pending)
+    status = Column(String(20), default="pending")
+
+    # Approval
+    approved_by = Column(String(100))
+    approved_at = Column(DateTime)
+    rejection_reason = Column(Text)
+
+    # Execution (QBO write — gated by approved status + explicit controller call)
+    executed_at = Column(DateTime)
+    execution_result = Column(JSONType)
+    qbo_update_response = Column(JSONType)
+    verification_status = Column(String(20))   # verified | failed | unverified
+    verified_at = Column(DateTime)
+
+    # Engine error capture — surfaced to UI, never silently swallowed
+    error_message = Column(Text)
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="work_items")
+
+
+# ── Company Rules (client-specific accounting rules) ──────────
+class CompanyRule(Base):
+    """
+    Client-specific accounting rules evaluated by the categorization engine.
+    realm_id is NON-NULLABLE: schema-level company isolation.
+    A rule created for one company CANNOT be evaluated against another.
+
+    Rule types:
+      CATEGORIZE — match pattern → assign proposed_account (most common)
+      SKIP       — match pattern → suppress proposal (txn already handled)
+      FLAG       — match pattern → force autonomy_level=HUMAN_REQUIRED
+
+    Rules are checked in priority order (desc) before global library rules.
+    Only active/approved rules are evaluated by the engine.
+    """
+    __tablename__ = "company_rules"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)  # NON-NULLABLE: schema isolation
+
+    # Identity
+    rule_name = Column(String(255), nullable=False)       # human-readable name
+    description = Column(Text)                             # what this rule does and why
+
+    # Classification
+    rule_type = Column(String(30), nullable=False, default="CATEGORIZE")
+    # CATEGORIZE | SKIP | FLAG
+
+    # Matching condition
+    condition_type = Column(String(30), default="PAYEE_OR_MEMO")
+    # PAYEE_MATCH | MEMO_MATCH | PAYEE_OR_MEMO | PAYEE_AND_MEMO | REGEX | AMOUNT_RANGE
+    pattern = Column(String(500), nullable=False)          # keyword or regex string
+    pattern_flags = Column(String(50), default="case_insensitive")  # e.g. "case_insensitive"
+
+    # Proposed action (for CATEGORIZE rules)
+    proposed_account_id = Column(String(100))
+    proposed_account_name = Column(String(255))
+
+    # Confidence contribution from this rule
+    confidence_strength = Column(String(10), default="high")  # high | medium | low
+
+    # Control
+    priority = Column(Integer, default=100)    # higher number = checked first
+    status = Column(String(20), default="active")  # active | suspended | draft | archived
+
+    # Governance
+    created_by = Column(String(100))           # who created this rule
+    approved_by = Column(String(100))          # controller who approved
+    approved_at = Column(DateTime)
+    version = Column(Integer, default=1)       # incremented on each material change
+    rule_history = Column(JSONType)            # [{version, changed_at, changed_by, change_summary}]
+
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    company = relationship("Company", back_populates="company_rules")
+
+
 # ── Database Setup ────────────────────────────────────────────
 
 def _build_engine():
@@ -551,9 +716,39 @@ engine = _build_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def _run_migrations():
+    """Add any missing columns to existing tables (safe to run on every startup)."""
+    migrations = [
+        # company_type added for restaurant feature
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_type VARCHAR(30) DEFAULT 'standard'",
+        # restaurant sales table columns
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS gross_sales FLOAT DEFAULT 0",
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS refunds FLOAT DEFAULT 0",
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS tax_collected FLOAT DEFAULT 0",
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS tips FLOAT DEFAULT 0",
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS je_status VARCHAR(30)",
+        "ALTER TABLE restaurant_sales_data ADD COLUMN IF NOT EXISTS je_id VARCHAR(100)",
+        # Phase 1 WorkItem: materiality_limit on company profiles
+        "ALTER TABLE company_profiles ADD COLUMN IF NOT EXISTS materiality_limit FLOAT DEFAULT 2500",
+        # Client linkage on companies (nullable — preserves existing connections)
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS client_id VARCHAR(36)",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(sqlalchemy.text(sql))
+            except Exception:
+                pass  # column may already exist or table not yet created
+        conn.commit()
+
+
 def init_db():
-    """Create all tables."""
+    """Create all tables then run column migrations."""
     Base.metadata.create_all(bind=engine)
+    try:
+        _run_migrations()
+    except Exception:
+        pass  # non-fatal; SQLite doesn't support IF NOT EXISTS on ALTER
 
 
 def get_db():
