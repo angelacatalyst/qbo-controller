@@ -369,14 +369,21 @@ def run_accounting_assessment(db: Session, company: Company, profile: CompanyPro
     """
     new_issues = []
 
+    # Count existing issues ONCE (before any new ones are added to the session).
+    # autoflush=False means repeated count() queries won't see newly db.add()-ed
+    # objects, so _make_issue_id would return ISS-0001 every time if called in a
+    # loop → UNIQUE constraint violation on db.commit(). Use a local counter instead.
+    _base_count = db.query(AccountingIssue).filter_by(realm_id=company.realm_id).count()
+
     def add(category, severity, title, description, recommended_action,
             amount=None, financial_impact=None, account_name=None,
             risk=None, likely_cause=None, documentation_required=None,
             approval_required=False):
-        iss = _create_issue(
-            db,
-            realm_id=company.realm_id,
+        issue_id = f"ISS-{_base_count + len(new_issues) + 1:04d}"
+        iss = AccountingIssue(
+            issue_id=issue_id,
             company_id=company.id,
+            realm_id=company.realm_id,
             category=category,
             severity=severity,
             title=title,
@@ -390,6 +397,7 @@ def run_accounting_assessment(db: Session, company: Company, profile: CompanyPro
             documentation_required=documentation_required or "",
             approval_required=approval_required,
         )
+        db.add(iss)
         new_issues.append(iss)
 
     if not profile:
