@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}{% if client %}Edit Client{% else %}Add Client{% endif %} — AI Bookkeeper{% endblock %}
+
+{% block content %}
+<div class="container py-4" style="max-width:680px;">
+
+  <div class="mb-4">
+    <a href="/clients" class="text-decoration-none text-muted" style="font-size:.9rem;">
+      <i class="bi bi-arrow-left me-1"></i>All Clients
+    </a>
+  </div>
+
+  <div class="card border-0 shadow-sm">
+    <div class="card-body p-4 p-md-5">
+
+      {# Header #}
+      <div class="mb-4">
+        <h3 class="fw-bold mb-1" style="color:#1a1a2e;">
+          {% if client %}<i class="bi bi-pencil-square me-2" style="color:#6366f1;"></i>Edit Client
+          {% else %}<i class="bi bi-person-plus-fill me-2" style="color:#6366f1;"></i>Add Client
+          {% endif %}
+        </h3>
+        <p class="text-muted mb-0">
+          {% if client %}Update the client's information.
+          {% else %}Create a client profile first. You can connect their QBO afterwards.
+          {% endif %}
+        </p>
+      </div>
+
+      {# Error #}
+      {% if error %}
+      <div class="alert alert-danger d-flex align-items-center gap-2 mb-4">
+        <i class="bi bi-exclamation-triangle-fill"></i>
+        <div>{{ error }}</div>
+      </div>
+      {% endif %}
+
+      {# Form #}
+      <form method="post" action="{% if client %}/clients/{{ client.id }}/edit{% else %}/clients/new{% endif %}">
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="client_name">
+            Client Name <span class="text-danger">*</span>
+          </label>
+          <input type="text" class="form-control form-control-lg" id="client_name" name="client_name"
+                 placeholder="e.g. Sabores Komali" required
+                 value="{{ client.client_name if client else '' }}">
+          <div class="form-text">How you refer to this client internally.</div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="legal_business_name">Legal Business Name</label>
+          <input type="text" class="form-control" id="legal_business_name" name="legal_business_name"
+                 placeholder="e.g. Sabores Komali LLC"
+                 value="{{ client.legal_business_name if client else '' }}">
+          <div class="form-text">Official name as registered (if different from above).</div>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label fw-semibold" for="contact_name">Contact Name</label>
+            <input type="text" class="form-control" id="contact_name" name="contact_name"
+                   placeholder="e.g. Maria García"
+                   value="{{ client.contact_name if client else '' }}">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-semibold" for="email">Email</label>
+            <input type="email" class="form-control" id="email" name="email"
+                   placeholder="owner@business.com"
+                   value="{{ client.email if client else '' }}">
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="phone">Phone</label>
+          <input type="text" class="form-control" id="phone" name="phone"
+                 placeholder="(555) 000-0000"
+                 value="{{ client.phone if client else '' }}">
+        </div>
+
+        <div class="mb-4">
+          <label class="form-label fw-semibold" for="notes">Notes</label>
+          <textarea class="form-control" id="notes" name="notes" rows="3"
+                    placeholder="Industry, fiscal year, special instructions...">{{ client.notes if client else '' }}</textarea>
+        </div>
+
+        {% if client %}
+        <div class="mb-4">
+          <label class="form-label fw-semibold" for="status">Status</label>
+          <select class="form-select" id="status" name="status">
+            <option value="active" {% if client.status == 'active' %}selected{% endif %}>Active</option>
+            <option value="inactive" {% if client.status == 'inactive' %}selected{% endif %}>Inactive</option>
+            <option value="prospect" {% if client.status == 'prospect' %}selected{% endif %}>Prospect</option>
+          </select>
+        </div>
+        {% endif %}
+
+        <div class="d-flex gap-3 justify-content-end mt-2">
+          <a href="/clients" class="btn btn-outline-secondary">Cancel</a>
+          <button type="submit" class="btn btn-primary px-4">
+            <i class="bi bi-check-lg me-1"></i>
+            {% if client %}Save Changes{% else %}Save Client{% endif %}
+          </button>
+        </div>
+
+      </form>
+    </div>
+  </div>
+
+  {% if not client %}
+  <div class="mt-3 p-3 rounded" style="background:#f0f0ff;border:1px solid #c7c7ff;">
+    <div class="d-flex gap-2 align-items-start">
+      <i class="bi bi-info-circle-fill mt-1" style="color:#6366f1;flex-shrink:0;"></i>
+      <div class="small text-muted">
+        <strong style="color:#4338ca;">Next step:</strong>
+        After saving, you'll be able to connect this client's QuickBooks Online account from their workspace.
+        No QBO credentials are needed here.
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
