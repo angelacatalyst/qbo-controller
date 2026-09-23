@@ -20,6 +20,8 @@ from app.config import settings
 from app.database import (
     AccountingIssue, ChangeLog, Company, CompanyProfile,
     MonthEndClose, ProposedJournalEntry, SyncHistory,
+    ProposedCategorization, ProposedARMatch, RestaurantSalesData,
+    ExternalCredentials,
     _now, get_db, init_db
 )
 from app.security import decrypt_token, encrypt_token
@@ -32,6 +34,16 @@ from app.accounting import (
     get_portfolio_summary, run_accounting_assessment, update_close_step,
     analyze_revenue, analyze_bank_reconciliation,
     _parse_balance_sheet, _parse_pl, _parse_ar_aging, _parse_ap_aging,
+)
+from app.bookkeeping import (
+    run_categorization, run_ar_matching, run_bank_reconciliation,
+    apply_categorization, apply_ar_match,
+)
+from app.restaurant import (
+    fetch_square_sales_for_date, generate_daily_sales_je, save_platform_sales,
+    parse_grubhub_csv, parse_ubereats_csv, parse_doordash_csv,
+    parse_otter_csv, parse_picnic_csv,
+    build_square_auth_url, exchange_square_code, save_square_credentials,
 )
 
 import os
@@ -847,3 +859,439 @@ def company_summary_api(realm_id: str, db: Session = Depends(get_db)):
         "open_issues": len(issues),
         "critical_issues": sum(1 for i in issues if i.severity == "critical"),
     }
+
+
+# ════════════════════════════════════════════════════════════════
+# ─── BOOKKEEPING: CATEGORIZATION ────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/company/{realm_id}/bookkeeping", response_class=HTMLResponse)
+def bookkeeping_dashboard(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+
+    cats = db.query(ProposedCategorization).filter_by(
+        realm_id=realm_id
+    ).order_by(ProposedCategorization.created_at.desc()).limit(200).all()
+
+    pending = [c for c in cats if c.status == "pending"]
+    approved = [c for c in cats if c.status == "approved"]
+    applied = [c for c in cats if c.status == "applied"]
+    rejected = [c for c in cats if c.status == "rejected"]
+
+    return templates.TemplateResponse(request, "bookkeeping.html", {
+        "company": company,
+        "profile": profile,
+        "pending": pending,
+        "approved": approved,
+        "applied": applied,
+        "rejected": rejected,
+        "total": len(cats),
+        "saved": request.query_params.get("saved"),
+    })
+
+
+@app.post("/company/{realm_id}/categorize")
+def run_categorize(
+    realm_id: str,
+    lookback_days: int = Form(90),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Sync QBO data first (no profile found)")
+
+    result = run_categorization(db, company, profile, lookback_days=lookback_days)
+    db.commit()
+    return RedirectResponse(
+        url=f"/company/{realm_id}/bookkeeping?saved=Categorization+run:+{result.get('proposed', 0)}+proposals+created",
+        status_code=302,
+    )
+
+
+@app.post("/company/{realm_id}/categorization/{cat_id}/approve")
+def approve_categorization(realm_id: str, cat_id: int, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categorization proposal not found")
+    cat.status = "approved"
+    cat.approved_at = _now()
+    cat.approved_by = "controller"
+    db.commit()
+    return JSONResponse({"ok": True, "status": "approved"})
+
+
+@app.post("/company/{realm_id}/categorization/{cat_id}/reject")
+def reject_categorization(
+    realm_id: str,
+    cat_id: int,
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categorization proposal not found")
+    cat.status = "rejected"
+    cat.rejection_reason = reason
+    db.commit()
+    return JSONResponse({"ok": True, "status": "rejected"})
+
+
+@app.post("/company/{realm_id}/categorization/{cat_id}/apply")
+def apply_categorization_route(realm_id: str, cat_id: int, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    cat = db.query(ProposedCategorization).filter_by(id=cat_id, realm_id=realm_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categorization proposal not found")
+    if cat.status != "approved":
+        raise HTTPException(status_code=400, detail="Proposal must be approved before applying")
+
+    result = apply_categorization(db, company, cat)
+    if result.get("success"):
+        db.commit()
+        return JSONResponse({"ok": True, "status": "applied"})
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+
+
+# ════════════════════════════════════════════════════════════════
+# ─── BOOKKEEPING: AR MATCHING ───────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/company/{realm_id}/ar-matching", response_class=HTMLResponse)
+def ar_matching_dashboard(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+
+    matches = db.query(ProposedARMatch).filter_by(
+        realm_id=realm_id
+    ).order_by(ProposedARMatch.created_at.desc()).limit(200).all()
+
+    pending = [m for m in matches if m.status == "pending"]
+    approved = [m for m in matches if m.status == "approved"]
+    applied = [m for m in matches if m.status == "applied"]
+    rejected = [m for m in matches if m.status == "rejected"]
+
+    return templates.TemplateResponse(request, "ar_matching.html", {
+        "company": company,
+        "profile": profile,
+        "pending": pending,
+        "approved": approved,
+        "applied": applied,
+        "rejected": rejected,
+        "total": len(matches),
+        "saved": request.query_params.get("saved"),
+    })
+
+
+@app.post("/company/{realm_id}/ar-match")
+def run_ar_match(
+    realm_id: str,
+    lookback_days: int = Form(180),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Sync QBO data first (no profile found)")
+
+    result = run_ar_matching(db, company, profile, lookback_days=lookback_days)
+    db.commit()
+    return RedirectResponse(
+        url=f"/company/{realm_id}/ar-matching?saved=AR+Match+run:+{result.get('proposed', 0)}+proposals",
+        status_code=302,
+    )
+
+
+@app.post("/company/{realm_id}/ar-match/{match_id}/approve")
+def approve_ar_match(realm_id: str, match_id: int, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    match = db.query(ProposedARMatch).filter_by(id=match_id, realm_id=realm_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="AR match proposal not found")
+    match.status = "approved"
+    match.approved_at = _now()
+    match.approved_by = "controller"
+    db.commit()
+    return JSONResponse({"ok": True, "status": "approved"})
+
+
+@app.post("/company/{realm_id}/ar-match/{match_id}/reject")
+def reject_ar_match(
+    realm_id: str,
+    match_id: int,
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    match = db.query(ProposedARMatch).filter_by(id=match_id, realm_id=realm_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="AR match proposal not found")
+    match.status = "rejected"
+    match.rejection_reason = reason
+    db.commit()
+    return JSONResponse({"ok": True, "status": "rejected"})
+
+
+@app.post("/company/{realm_id}/ar-match/{match_id}/apply")
+def apply_ar_match_route(realm_id: str, match_id: int, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    match = db.query(ProposedARMatch).filter_by(id=match_id, realm_id=realm_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="AR match proposal not found")
+    if match.status != "approved":
+        raise HTTPException(status_code=400, detail="Match must be approved before applying")
+
+    result = apply_ar_match(db, company, match)
+    if result.get("success"):
+        db.commit()
+        return JSONResponse({"ok": True, "status": "applied"})
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+
+
+# ════════════════════════════════════════════════════════════════
+# ─── BOOKKEEPING: BANK RECONCILIATION ───────────────────────────
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/company/{realm_id}/bank-rec", response_class=HTMLResponse)
+def bank_rec_page(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+
+    # Pull list of bank/credit-card accounts from profile CoA if available
+    accounts = []
+    if profile and profile.chart_of_accounts_data:
+        coa = profile.chart_of_accounts_data.get("QueryResponse", {}).get("Account", [])
+        accounts = [
+            a for a in coa
+            if a.get("AccountType") in ("Bank", "Credit Card")
+            and a.get("Active", True)
+        ]
+
+    return templates.TemplateResponse(request, "bank_rec.html", {
+        "company": company,
+        "profile": profile,
+        "accounts": accounts,
+        "result": None,
+        "saved": request.query_params.get("saved"),
+    })
+
+
+@app.post("/company/{realm_id}/bank-rec", response_class=HTMLResponse)
+def run_bank_rec(
+    realm_id: str,
+    request: Request,
+    account_id: str = Form(...),
+    account_name: str = Form(""),
+    statement_end_date: str = Form(...),
+    statement_ending_balance: float = Form(...),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Sync QBO data first")
+
+    result = run_bank_reconciliation(
+        db, company, profile,
+        account_id=account_id,
+        statement_end_date=statement_end_date,
+        statement_ending_balance=statement_ending_balance,
+    )
+
+    accounts = []
+    if profile.chart_of_accounts_data:
+        coa = profile.chart_of_accounts_data.get("QueryResponse", {}).get("Account", [])
+        accounts = [
+            a for a in coa
+            if a.get("AccountType") in ("Bank", "Credit Card")
+            and a.get("Active", True)
+        ]
+
+    return templates.TemplateResponse(request, "bank_rec.html", {
+        "company": company,
+        "profile": profile,
+        "accounts": accounts,
+        "result": result,
+        "selected_account_id": account_id,
+        "selected_account_name": account_name,
+        "statement_end_date": statement_end_date,
+        "statement_ending_balance": statement_ending_balance,
+        "saved": None,
+    })
+
+
+# ════════════════════════════════════════════════════════════════
+# ─── RESTAURANT: DAILY SALES & JOURNAL ENTRIES ──────────────────
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/company/{realm_id}/restaurant", response_class=HTMLResponse)
+def restaurant_dashboard(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+
+    # Recent 30 days of sales data
+    from datetime import date as _date
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    sales = db.query(RestaurantSalesData).filter(
+        RestaurantSalesData.realm_id == realm_id,
+        RestaurantSalesData.created_at >= cutoff,
+    ).order_by(RestaurantSalesData.sales_date.desc(), RestaurantSalesData.platform).all()
+
+    # Group by date for summary view
+    from collections import defaultdict
+    by_date: dict = defaultdict(list)
+    for s in sales:
+        by_date[str(s.sales_date)].append(s)
+
+    # External credentials (connected platforms)
+    creds = db.query(ExternalCredentials).filter_by(realm_id=realm_id).all()
+    connected_platforms = {c.platform: c for c in creds}
+
+    # Square OAuth URL
+    square_auth_url = build_square_auth_url(realm_id) if "square" not in connected_platforms else None
+
+    return templates.TemplateResponse(request, "restaurant.html", {
+        "company": company,
+        "profile": profile,
+        "by_date": dict(by_date),
+        "connected_platforms": connected_platforms,
+        "square_auth_url": square_auth_url,
+        "saved": request.query_params.get("saved"),
+        "error": request.query_params.get("error"),
+    })
+
+
+@app.post("/company/{realm_id}/restaurant/fetch-square")
+def fetch_square_sales(
+    realm_id: str,
+    sales_date: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Fetch Square sales for a specific date via API."""
+    company = get_company_or_404(db, realm_id)
+    cred = db.query(ExternalCredentials).filter_by(
+        realm_id=realm_id, platform="square"
+    ).first()
+    if not cred:
+        raise HTTPException(status_code=400, detail="Square not connected. Connect Square first.")
+
+    try:
+        result = fetch_square_sales_for_date(db, company, cred, sales_date)
+        db.commit()
+        return RedirectResponse(
+            url=f"/company/{realm_id}/restaurant?saved=Square+data+fetched+for+{sales_date}",
+            status_code=302,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/company/{realm_id}/restaurant?error={str(exc)[:120]}",
+            status_code=302,
+        )
+
+
+@app.post("/company/{realm_id}/restaurant/import-csv")
+async def import_platform_csv(
+    realm_id: str,
+    request: Request,
+    platform: str = Form(...),
+    sales_date: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a CSV report from a delivery platform."""
+    from fastapi import UploadFile, File
+    company = get_company_or_404(db, realm_id)
+
+    form = await request.form()
+    csv_file = form.get("csv_file")
+    if not csv_file or not hasattr(csv_file, "read"):
+        raise HTTPException(status_code=400, detail="No CSV file provided")
+
+    content = (await csv_file.read()).decode("utf-8", errors="replace")
+
+    parsers = {
+        "grubhub": parse_grubhub_csv,
+        "uber_eats": parse_ubereats_csv,
+        "doordash": parse_doordash_csv,
+        "otter": parse_otter_csv,
+        "picnic": parse_picnic_csv,
+    }
+    parser = parsers.get(platform)
+    if not parser:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    try:
+        data = parser(content, sales_date)
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/company/{realm_id}/restaurant?error=CSV+parse+error:+{str(exc)[:100]}",
+            status_code=302,
+        )
+
+    save_platform_sales(db, company, data)
+    db.commit()
+    return RedirectResponse(
+        url=f"/company/{realm_id}/restaurant?saved={platform}+CSV+imported+for+{sales_date}",
+        status_code=302,
+    )
+
+
+@app.post("/company/{realm_id}/restaurant/generate-je/{sales_date}")
+def generate_restaurant_je(
+    realm_id: str,
+    sales_date: str,
+    db: Session = Depends(get_db),
+):
+    """Generate a proposed journal entry for the specified sales date."""
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Sync QBO data first")
+
+    result = generate_daily_sales_je(db, company, profile, sales_date)
+    if result.get("error"):
+        return RedirectResponse(
+            url=f"/company/{realm_id}/restaurant?error={result['error'][:120]}",
+            status_code=302,
+        )
+    db.commit()
+    return RedirectResponse(
+        url=f"/company/{realm_id}/restaurant?saved=Journal+entry+{result.get('je_number', '')}+proposed+for+{sales_date}",
+        status_code=302,
+    )
+
+
+# ─── Square OAuth ──────────────────────────────────────────────
+
+@app.get("/auth/square/callback")
+def square_oauth_callback(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    if error:
+        return HTMLResponse(f"<h3>Square authorization failed: {error}</h3>", status_code=400)
+    if not code or not state:
+        return HTMLResponse("<h3>Missing code or state parameter</h3>", status_code=400)
+
+    # state encodes realm_id
+    realm_id = state
+    company = db.query(Company).filter_by(realm_id=realm_id).first()
+    if not company:
+        return HTMLResponse("<h3>Company not found</h3>", status_code=404)
+
+    try:
+        token_data = exchange_square_code(code)
+        save_square_credentials(db, company, token_data)
+        db.commit()
+        return RedirectResponse(
+            url=f"/company/{realm_id}/restaurant?saved=Square+connected+successfully",
+            status_code=302,
+        )
+    except Exception as exc:
+        return HTMLResponse(f"<h3>Error connecting Square: {exc}</h3>", status_code=500)
