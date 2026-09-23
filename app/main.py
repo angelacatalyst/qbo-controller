@@ -75,6 +75,23 @@ def startup():
         print(f"⚠ Database init failed — app will start anyway: {exc}")
         traceback.print_exc()
 
+    # ── Column migrations (safe to run every startup) ──────────
+    from app.database import engine
+    import sqlalchemy as _sa
+    _migrations = [
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_type VARCHAR(30) DEFAULT 'standard'",
+    ]
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as _conn:
+            for _sql in _migrations:
+                try:
+                    _conn.execute(_sa.text(_sql))
+                    print(f"✓ Migration OK: {_sql[:60]}")
+                except Exception as _e:
+                    print(f"⚠ Migration skip: {_e}")
+    except Exception as _e:
+        print(f"⚠ Migration connection error: {_e}")
+
 
 # ─── Jinja2 Filters ───────────────────────────────────────────
 
