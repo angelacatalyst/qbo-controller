@@ -59,47 +59,161 @@
   </div>
   {% endif %}
 
-  <!-- Diagnostic banner (shown after engine run) -->
+  <!-- Diagnostic panel (shown after engine run) -->
   {% if diagnostic %}
   {% set diag = diagnostic | from_json %}
   <div class="diag-card mb-4">
-    <div class="d-flex align-items-center gap-2 mb-2">
+    <div class="d-flex align-items-center gap-2 mb-3">
       <i class="bi bi-bar-chart-fill text-primary"></i>
       <strong>Last Engine Run — Diagnostic</strong>
-      <span class="badge bg-success ms-1">QBO Writes: {{ diag.qbo_writes }}</span>
-    </div>
-    <div class="row g-3">
-      <div class="col-auto">
-        <div class="text-muted" style="font-size:11px;">UNCATEGORIZED FOUND</div>
-        <div class="diag-val">{{ diag.uncategorized }}</div>
-      </div>
-      <div class="col-auto">
-        <div class="text-muted" style="font-size:11px;">WORKITEMS CREATED</div>
-        <div class="diag-val text-success">{{ diag.created }}</div>
-      </div>
-      {% if diag.errors %}
-      <div class="col-auto">
-        <div class="text-muted" style="font-size:11px;">API ERRORS</div>
-        <div class="diag-val diag-err">{{ diag.errors }}</div>
-      </div>
+      {% if diag.engine_status == 'COMPLETED' %}
+        <span class="badge bg-success ms-2">{{ diag.engine_status }}</span>
+      {% elif diag.engine_status == 'COMPLETED_WITH_WARNINGS' %}
+        <span class="badge bg-warning text-dark ms-2">{{ diag.engine_status }}</span>
+      {% elif diag.engine_status == 'PARTIALLY_COMPLETED' %}
+        <span class="badge bg-warning text-dark ms-2">{{ diag.engine_status }}</span>
+      {% elif diag.engine_status == 'FAILED' %}
+        <span class="badge bg-danger ms-2">{{ diag.engine_status }}</span>
+      {% else %}
+        <span class="badge bg-secondary ms-2">{{ diag.engine_status | default('—') }}</span>
       {% endif %}
-      <div class="col-auto">
-        <div class="text-muted" style="font-size:11px;">AUTONOMY BREAKDOWN</div>
-        <div style="font-size:12px; margin-top:2px;">
-          <span class="auto-1 me-1">BATCH {{ diag.breakdown.BATCH }}</span>
-          <span class="auto-2 me-1">INDIVIDUAL {{ diag.breakdown.INDIVIDUAL }}</span>
-          <span class="auto-3 me-1">HUMAN {{ diag.breakdown.HUMAN_REQUIRED }}</span>
+      <span class="badge bg-success ms-auto">QBO Writes: {{ diag.qbo_writes }}</span>
+    </div>
+
+    <!-- Section 1: Posted Transactions -->
+    <div class="mb-3">
+      <div class="text-muted fw-semibold mb-1" style="font-size:11px; letter-spacing:.06em;">POSTED TRANSACTIONS</div>
+      <div class="row g-2">
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">REVIEWED</div>
+          <div class="diag-val">{{ diag.reviewed | default(0) }}</div>
+        </div>
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">UNCATEGORIZED</div>
+          <div class="diag-val text-warning">{{ diag.uncategorized | default(0) }}</div>
+        </div>
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">NEEDS REVIEW</div>
+          <div class="diag-val text-info">{{ diag.needs_review | default(0) }}</div>
+        </div>
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">OK</div>
+          <div class="diag-val text-success">{{ diag.items_ok | default(0) }}</div>
+        </div>
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">WORKITEMS CREATED</div>
+          <div class="diag-val text-primary">{{ diag.created }}</div>
+        </div>
+        <div class="col-auto">
+          <div class="text-muted" style="font-size:11px;">AUTONOMY</div>
+          <div style="font-size:12px; margin-top:4px; line-height:1.7;">
+            <span class="auto-1 me-1">BATCH {{ diag.breakdown.BATCH }}</span>
+            <span class="auto-2 me-1">INDIVIDUAL {{ diag.breakdown.INDIVIDUAL }}</span>
+            <span class="auto-3">HUMAN {{ diag.breakdown.HUMAN_REQUIRED }}</span>
+          </div>
         </div>
       </div>
     </div>
-    {% if diag.api_errors %}
-    <div class="mt-2">
-      <div class="text-muted" style="font-size:11px;">ERRORS</div>
-      {% for err in diag.api_errors %}
-      <div class="diag-err" style="font-size:12px;"><strong>{{ err.type }}:</strong> {{ err.error }}</div>
-      {% endfor %}
+
+    <!-- Section 2: Bank Feed -->
+    <div class="mb-3 p-2 rounded" style="background:rgba(255,193,7,.08); border:1px solid rgba(255,193,7,.3);">
+      <div class="d-flex align-items-start gap-2">
+        <i class="bi bi-exclamation-triangle-fill text-warning mt-1" style="font-size:13px; flex-shrink:0;"></i>
+        <div>
+          <div class="fw-semibold" style="font-size:12px;">BANK FEED LIMITATION (Intuit Platform)</div>
+          <div class="text-muted" style="font-size:11px; margin-top:2px;">
+            {{ diag.bank_feed_note | default("QBO Bank Feed / For Review transactions are not accessible via QBO API v3.") }}
+          </div>
+          <a href="https://app.qbo.intuit.com/app/banking" target="_blank" rel="noopener"
+             class="btn btn-outline-warning btn-sm mt-2" style="font-size:11px;">
+            <i class="bi bi-box-arrow-up-right me-1"></i>Review Bank Feed in QBO
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 3: Diagnostics -->
+    <div>
+      <div class="text-muted fw-semibold mb-1" style="font-size:11px; letter-spacing:.06em;">DIAGNOSTICS</div>
+
+      {% if diag.entities_not_supported %}
+      <div class="mb-2">
+        <div class="text-muted" style="font-size:11px;">ENTITY TYPES NOT SUPPORTED (Intuit confirmed)</div>
+        {% for ens in diag.entities_not_supported %}
+        <div class="text-warning" style="font-size:12px;">
+          <i class="bi bi-info-circle me-1"></i><strong>{{ ens.entity }}:</strong> {{ ens.reason }}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if diag.api_errors %}
+      <div class="mb-2">
+        <div class="text-muted" style="font-size:11px;">API ERRORS (require attention)</div>
+        {% for err in diag.api_errors %}
+        <div class="diag-err" style="font-size:12px;">
+          <i class="bi bi-x-circle me-1"></i><strong>{{ err.type }}:</strong> {{ err.error }}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if not diag.entities_not_supported and not diag.api_errors %}
+      <div class="text-success" style="font-size:12px;">
+        <i class="bi bi-check-circle me-1"></i>No errors — all entity types queried successfully.
+      </div>
+      {% endif %}
+
+      <div class="text-muted mt-1" style="font-size:11px;">
+        <i class="bi bi-shield-check me-1"></i>QBO writes this run: <strong>{{ diag.qbo_writes }}</strong> (invariant — AI Bookkeeper is read/analyze only)
+      </div>
+    </div>
+
+    <!-- Section 4: Module Status -->
+    {% if diag.module_results %}
+    <div class="mt-3">
+      <div class="text-muted fw-semibold mb-2" style="font-size:11px; letter-spacing:.06em;">MODULE STATUS</div>
+      <div class="row g-1">
+        {% for mod_name, mod in diag.module_results.items() %}
+        {% set mod_status = mod.status | default('UNKNOWN') %}
+        <div class="col-12 col-md-6">
+          <div class="d-flex align-items-start gap-2 p-2 rounded" style="background:#f8fafc; border:1px solid #e2e8f0; font-size:12px;">
+            {% if mod_status == 'COMPLETED' %}
+              <i class="bi bi-check-circle-fill text-success mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% elif mod_status == 'COMPLETED_WITH_WARNINGS' %}
+              <i class="bi bi-exclamation-circle-fill text-warning mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% elif mod_status == 'PARTIALLY_COMPLETED' %}
+              <i class="bi bi-exclamation-triangle-fill text-warning mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% elif mod_status == 'FAILED' %}
+              <i class="bi bi-x-circle-fill text-danger mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% elif mod_status == 'NOT_IMPLEMENTED' %}
+              <i class="bi bi-dash-circle text-secondary mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% elif mod_status == 'RUNNING' %}
+              <i class="bi bi-arrow-repeat text-primary mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% else %}
+              <i class="bi bi-circle text-secondary mt-1" style="font-size:13px; flex-shrink:0;"></i>
+            {% endif %}
+            <div style="min-width:0;">
+              <div class="fw-semibold" style="font-size:11px; letter-spacing:.04em;">{{ mod_name }}</div>
+              <div class="text-muted" style="font-size:11px;">{{ mod.message | default('') }}</div>
+              {% if mod.warnings %}
+              {% for w in mod.warnings %}
+              <div class="text-warning" style="font-size:10px; margin-top:2px;"><i class="bi bi-exclamation-triangle me-1"></i>{{ w }}</div>
+              {% endfor %}
+              {% endif %}
+              {% if mod.errors %}
+              {% for e in mod.errors %}
+              <div class="text-danger" style="font-size:10px; margin-top:2px;"><i class="bi bi-x-circle me-1"></i>{{ e }}</div>
+              {% endfor %}
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
     </div>
     {% endif %}
+
   </div>
   {% endif %}
 

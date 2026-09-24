@@ -28,7 +28,7 @@ from app.database import (
 )
 
 logger = logging.getLogger(__name__)
-from app.qbo_client import QBOClient
+from app.qbo_client import QBOClient, classify_qbo_error
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -343,6 +343,30 @@ _UNCATEGORIZED_SUBTYPES = frozenset([
 ])
 
 
+# QBO account names that are too generic to be meaningful even though
+# they are not technically "uncategorized".  Transactions posted here
+# should be reviewed and moved to a more specific account.
+_GENERIC_CATEGORY_KEYWORDS = frozenset([
+    "miscellaneous",
+    "general expense",
+    "general income",
+    "other expense",
+    "other income",
+])
+
+
+def _is_generic_category(account_name: str) -> bool:
+    """Return True if the account exists but is a generic catch-all.
+
+    Distinct from _is_uncategorized_v2: the account is a real QBO account,
+    but too vague to be useful for financial reporting.  We do NOT re-check
+    uncategorized keywords here — callers should call _is_uncategorized_v2
+    first and only call this when that returns False.
+    """
+    name_lower = (account_name or "").strip().lower()
+    return any(kw in name_lower for kw in _GENERIC_CATEGORY_KEYWORDS)
+
+
 def _is_uncategorized_v2(account_name: str, account_subtype: str = "") -> bool:
     """Return True if this account/subtype indicates an uncategorized transaction.
 
@@ -554,12 +578,33 @@ def run_categorization_v2(
         qbo_writes          int  (always 0 — invariant)
     """
     diagnostic = {
+        # ── Fetch counts (one per entity type) ──────────────────────────
         "txn_counts": {},
-        "uncategorized_count": 0,
+
+        # ── Transaction review summary ───────────────────────────────────
+        "posted_transactions_reviewed": 0,   # total posted txns inspected
+        "items_uncategorized": 0,            # no account / placeholder account
+        "items_needing_review": 0,           # generic acct, flag, dup, transfer
+        "items_ok": 0,                       # well-categorized, no action needed
+
+        # ── WorkItem creation ────────────────────────────────────────────
         "work_items_created": 0,
         "autonomy_breakdown": {"AUTO": 0, "BATCH": 0, "INDIVIDUAL": 0, "HUMAN_REQUIRED": 0},
-        "api_errors": [],
         "skipped_items": [],
+
+        # ── Error classification (separated) ────────────────────────────
+        "entities_not_supported": [],   # [{entity, reason}] — Intuit confirmed
+        "api_errors": [],               # real errors requiring attention
+
+        # ── Bank Feed limitation (always documented) ─────────────────────
+        "bank_feed_limitation": True,
+        "bank_feed_note": (
+            "QBO Bank Feed / For Review transactions are not accessible via the "
+            "QBO Accounting API v3. The AI Bookkeeper analyzes transactions after "
+            "they are posted to the books."
+        ),
+
+        # ── Safety invariant ────────────────────────────────────────────
         "qbo_writes": 0,   # INVARIANT: always 0
     }
 
@@ -575,33 +620,161 @@ def run_categorization_v2(
     client = QBOClient(company)
     start_date = (date.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
+    def _now_iso() -> str:
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ── Module results structure (Phase 2) ──────────────────────────────────
+    # BANKING module is the only one active in this run; others are stubs.
+    # Overall engine_status is derived from module statuses after all modules run.
+    module_results: dict = {
+        "BANKING": {
+            "status": "NOT_STARTED",
+            "message": "",
+            "items_scanned": 0,
+            "issues_found": 0,
+            "work_items_created": 0,
+            "errors": [],
+            "warnings": [],
+            "data_freshness": "live_qbo",
+            "started_at": None,
+            "completed_at": None,
+        },
+        "CREDIT_CARDS": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Credit card module not yet implemented.",
+            "data_freshness": "n/a",
+        },
+        "SALES_AR": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "AR matching runs separately via the AR Matching engine.",
+            "data_freshness": "n/a",
+        },
+        "EXPENSES_AP": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "AP / accounts payable module not yet implemented.",
+            "data_freshness": "n/a",
+        },
+        "PAYROLL": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Payroll module not yet implemented.",
+            "data_freshness": "n/a",
+        },
+        "TAXES": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Tax module not yet implemented.",
+            "data_freshness": "n/a",
+        },
+        "ACCOUNTING": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Accounting assessment runs separately via the Accounting module.",
+            "data_freshness": "cached_profile",
+        },
+        "ASSESSMENT": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Assessment runs separately via the Accounting module.",
+            "data_freshness": "cached_profile",
+        },
+        "CONTROL": {
+            "status": "NOT_IMPLEMENTED",
+            "message": "Control / compliance module not yet implemented.",
+            "data_freshness": "n/a",
+        },
+    }
+    diagnostic["module_results"] = module_results
+
     # ── 1. Load company rules (realm-scoped) ────────────────────────────────
     company_rules = _load_company_rules(db, realm_id)
     logger.info("[v2:%s] Loaded %d company rules", realm_id, len(company_rules))
 
-    # ── 2. Fetch all four transaction types ─────────────────────────────────
-    raw_txns: list[tuple[str, dict]] = []   # (txn_type, txn_dict)
+    # ── 2. Fetch transactions — paginated, with Check fallback (Phase 1+3) ──
+    # BANKING module starts now
+    module_results["BANKING"]["status"] = "RUNNING"
+    module_results["BANKING"]["started_at"] = _now_iso()
 
-    type_fetchers = [
-        ("Purchase",      lambda: client.get_expenses(db, start_date=start_date)),
-        ("Check",         lambda: client.get_checks(db, start_date=start_date)),
-        ("Deposit",       lambda: client.get_deposits(db, start_date=start_date)),
-        ("SalesReceipt",  lambda: client.get_sales_receipts(db, start_date=start_date)),
+    raw_txns: list[tuple[str, dict]] = []
+    # seen_raw_ids: deduplicates across entity types.
+    # Critical when get_checks_with_fallback() falls back to Purchase — those
+    # records are identical to ones already fetched by the Purchase query.
+    seen_raw_ids: set[str] = set()
+
+    _banking_warnings: list[str] = []  # warnings for module_results["BANKING"]
+    _banking_errors: list[str] = []    # errors for module_results["BANKING"]
+
+    def _collect(txn_type: str, results: list, retrieval_info: dict | None = None) -> int:
+        """Add results to raw_txns, deduplicating by txn_id. Returns count added."""
+        added = 0
+        for txn in results:
+            tid = str(txn.get("Id", ""))
+            if tid and tid in seen_raw_ids:
+                continue
+            seen_raw_ids.add(tid)
+            raw_txns.append((txn_type, txn))
+            added += 1
+        diagnostic["txn_counts"][txn_type] = added
+        if retrieval_info and not retrieval_info.get("is_complete", True):
+            _banking_warnings.append(
+                f"{txn_type}: pagination — only {retrieval_info.get('total_fetched', added)} records "
+                f"retrieved (QBO has more). Consider narrowing lookback_days."
+            )
+        return added
+
+    # Simple entity types — direct _query_all (paginated)
+    _simple_entities = [
+        ("Purchase",    f"SELECT * FROM Purchase WHERE TxnDate >= '{start_date}'"),
+        ("Deposit",     f"SELECT * FROM Deposit WHERE TxnDate >= '{start_date}'"),
+        ("SalesReceipt",f"SELECT * FROM SalesReceipt WHERE TxnDate >= '{start_date}'"),
     ]
-
-    for txn_type, fetcher in type_fetchers:
+    for txn_type, sql_base in _simple_entities:
         try:
-            results = fetcher()
-            if results is None:
-                results = []
-            diagnostic["txn_counts"][txn_type] = len(results)
-            for txn in results:
-                raw_txns.append((txn_type, txn))
-            logger.info("[v2:%s] %s: fetched %d", realm_id, txn_type, len(results))
+            results, is_complete, total = client._query_all(db, sql_base)
+            _collect(txn_type, results or [], {"is_complete": is_complete, "total_fetched": total})
+            logger.info("[v2:%s] %s: fetched %d (complete=%s)", realm_id, txn_type, total, is_complete)
         except Exception as exc:
-            logger.error("[v2:%s] %s fetch error: %s", realm_id, txn_type, exc)
-            diagnostic["api_errors"].append({"type": txn_type, "error": str(exc)})
+            error_class, error_detail = classify_qbo_error(exc, entity=txn_type)
+            if error_class == "entity_not_supported":
+                logger.info("[v2:%s] %s: entity not supported — %s", realm_id, txn_type, error_detail)
+                diagnostic["entities_not_supported"].append({"entity": txn_type, "reason": error_detail})
+            else:
+                logger.error("[v2:%s] %s fetch error (class=%s): %s", realm_id, txn_type, error_class, error_detail)
+                diagnostic["api_errors"].append({"type": txn_type, "error": error_detail, "error_class": error_class})
+                _banking_errors.append(f"{txn_type}: {error_detail}")
             diagnostic["txn_counts"][txn_type] = 0
+
+    # Check entity — with fallback to Purchase(PaymentType='Check') for non-US companies
+    try:
+        check_results, check_info = client.get_checks_with_fallback(db, start_date=start_date)
+        if check_info["used_fallback"]:
+            # Log that Check entity was not supported and we used a fallback
+            diagnostic["entities_not_supported"].append({
+                "entity": "Check",
+                "reason": check_info["fallback_reason"],
+                "fallback_used": "Purchase WHERE PaymentType='Check'",
+            })
+            _banking_warnings.append(
+                f"Check entity not supported for this company; used "
+                f"Purchase(PaymentType='Check') fallback — "
+                f"{check_info['total_fetched']} records fetched. "
+                f"Duplicate IDs already in Purchase results are excluded."
+            )
+        _collect("Check", check_results, check_info)
+        logger.info(
+            "[v2:%s] Check (entity=%s fallback=%s): fetched %d (complete=%s)",
+            realm_id,
+            check_info["entity_used"],
+            check_info["used_fallback"],
+            check_info["total_fetched"],
+            check_info["is_complete"],
+        )
+    except Exception as exc:
+        error_class, error_detail = classify_qbo_error(exc, entity="Check")
+        if error_class == "entity_not_supported":
+            logger.info("[v2:%s] Check: entity not supported — %s", realm_id, error_detail)
+            diagnostic["entities_not_supported"].append({"entity": "Check", "reason": error_detail})
+        else:
+            logger.error("[v2:%s] Check fetch error (class=%s): %s", realm_id, error_class, error_detail)
+            diagnostic["api_errors"].append({"type": "Check", "error": error_detail, "error_class": error_class})
+            _banking_errors.append(f"Check: {error_detail}")
+        diagnostic["txn_counts"]["Check"] = 0
 
     # ── 3. Collect existing WorkItem txn_ids to avoid duplicates ────────────
     existing_txn_ids: set[str] = set(
@@ -620,6 +793,19 @@ def run_categorization_v2(
     accounts = _get_chart_of_accounts(db, client)   # cached fetch
     new_work_items: list[WorkItem] = []
 
+    # ── 4-pre. Build duplicate/transfer detection structures (one pass, no extra API calls) ──
+    seen_txn_signatures: dict[str, int] = {}
+    cross_type_amounts: dict[str, set] = {"credit": set(), "debit": set()}
+    for _tt, _txn in raw_txns:
+        _payee = (_txn.get("EntityRef", {}).get("name") or "").lower().strip()
+        _amt   = round(abs(float(_txn.get("TotalAmt") or _txn.get("Amount") or 0.0)), 2)
+        _sig   = f"{_tt}|{_amt}|{_payee}"
+        seen_txn_signatures[_sig] = seen_txn_signatures.get(_sig, 0) + 1
+        if _tt in ("Deposit", "SalesReceipt"):
+            cross_type_amounts["credit"].add(_amt)
+        else:
+            cross_type_amounts["debit"].add(_amt)
+
     for txn_type, txn in raw_txns:
         txn_id = str(txn.get("Id", ""))
         if not txn_id:
@@ -628,48 +814,9 @@ def run_categorization_v2(
             })
             continue
 
-        # ── 4a. Determine line account ──────────────────────────────────────
-        detail_key = _txn_type_detail_key(txn_type)
-        lines = txn.get(detail_key) or []
-        if isinstance(lines, dict):
-            lines = [lines]
+        diagnostic["posted_transactions_reviewed"] += 1
 
-        # Find the first line with an account reference
-        line_acct_id = None
-        line_acct_name = ""
-        line_acct_subtype = ""
-        for line in lines:
-            acct_ref = (
-                line.get("AccountBasedExpenseLineDetail", {}).get("AccountRef")
-                or line.get("SalesItemLineDetail", {}).get("ItemRef")
-                or line.get("DepositLineDetail", {}).get("AccountRef")
-                or line.get("AccountRef")
-                or {}
-            )
-            if acct_ref.get("value"):
-                line_acct_id = acct_ref["value"]
-                line_acct_name = acct_ref.get("name", "")
-                # Look up subtype from chart of accounts
-                for a in accounts:
-                    if str(a.get("Id")) == str(line_acct_id):
-                        line_acct_subtype = a.get("AccountSubType", "")
-                        break
-                break
-
-        # ── 4b. Check if uncategorized ──────────────────────────────────────
-        if not _is_uncategorized_v2(line_acct_name, line_acct_subtype):
-            continue   # already categorized — skip silently
-
-        diagnostic["uncategorized_count"] += 1
-
-        # ── 4c. Deduplicate ─────────────────────────────────────────────────
-        if txn_id in existing_txn_ids:
-            diagnostic["skipped_items"].append({
-                "txn_id": txn_id, "type": txn_type, "reason": "already has pending WorkItem"
-            })
-            continue
-
-        # ── 4d. Extract metadata ────────────────────────────────────────────
+        # ── 4a. Extract metadata (needed for all detection paths) ───────────
         payee_name = (
             txn.get("EntityRef", {}).get("name")
             or txn.get("PaymentMethodRef", {}).get("name")
@@ -684,9 +831,101 @@ def run_categorization_v2(
             txn_date = None
         amount = float(txn.get("TotalAmt") or txn.get("Amount") or 0.0)
 
-        # ── 4e. Apply company rules first ────────────────────────────────────
+        # ── 4b. Determine line account ──────────────────────────────────────
+        detail_key = _txn_type_detail_key(txn_type)
+        lines = txn.get(detail_key) or []
+        if isinstance(lines, dict):
+            lines = [lines]
+
+        line_acct_id = None
+        line_acct_name = ""
+        line_acct_subtype = ""
+        for line in lines:
+            acct_ref = (
+                line.get("AccountBasedExpenseLineDetail", {}).get("AccountRef")
+                or line.get("SalesItemLineDetail", {}).get("ItemRef")
+                or line.get("DepositLineDetail", {}).get("AccountRef")
+                or line.get("AccountRef")
+                or {}
+            )
+            if acct_ref.get("value"):
+                line_acct_id = acct_ref["value"]
+                line_acct_name = acct_ref.get("name", "")
+                for a in accounts:
+                    if str(a.get("Id")) == str(line_acct_id):
+                        line_acct_subtype = a.get("AccountSubType", "")
+                        break
+                break
+
+        # ── 4c. Classify the transaction ────────────────────────────────────
+        is_uncategorized = _is_uncategorized_v2(line_acct_name, line_acct_subtype)
+        is_generic = (not is_uncategorized) and _is_generic_category(line_acct_name)
+
+        # Duplicate detection: same txn_type + payee + rounded amount
+        _payee_lc = payee_name.lower().strip()
+        _amt_rounded = round(abs(amount), 2)
+        _dup_sig = f"{txn_type}|{_amt_rounded}|{_payee_lc}"
+        is_possible_duplicate = seen_txn_signatures.get(_dup_sig, 0) > 1
+
+        # Transfer detection: amount above threshold appears on both sides of books
+        _xfer_threshold = materiality_limit * 0.05
+        if txn_type in ("Deposit", "SalesReceipt"):
+            is_possible_transfer = (
+                _amt_rounded >= _xfer_threshold
+                and _amt_rounded in cross_type_amounts["debit"]
+            )
+        else:
+            is_possible_transfer = (
+                _amt_rounded >= _xfer_threshold
+                and _amt_rounded in cross_type_amounts["credit"]
+            )
+
+        # Apply company rules for ALL transactions (needed for POSSIBLE_MISCLASSIFICATION)
         matched_rule = _apply_company_rules(company_rules, payee_name, memo, amount)
-        rule_type = "CLIENT_RULE" if matched_rule else "CATEGORIZE"
+
+        # Determine review_type — priority order matters
+        if is_uncategorized:
+            review_type = "UNCATEGORIZED"
+            action_needed = True
+        elif is_generic:
+            review_type = "GENERIC_CATEGORY"
+            action_needed = True
+        elif matched_rule and matched_rule.rule_type == "FLAG":
+            review_type = "POSSIBLE_MISCLASSIFICATION"
+            action_needed = True
+        elif is_possible_duplicate:
+            review_type = "POSSIBLE_DUPLICATE"
+            action_needed = True
+        elif is_possible_transfer:
+            review_type = "POSSIBLE_TRANSFER"
+            action_needed = True
+        else:
+            review_type = "OK"
+            action_needed = False
+
+        # Update counters
+        if not action_needed:
+            diagnostic["items_ok"] += 1
+            continue   # well-categorized — no WorkItem needed
+
+        if review_type == "UNCATEGORIZED":
+            diagnostic["items_uncategorized"] += 1
+        else:
+            diagnostic["items_needing_review"] += 1
+
+        # ── 4d. Deduplicate WorkItems ───────────────────────────────────────
+        if txn_id in existing_txn_ids:
+            diagnostic["skipped_items"].append({
+                "txn_id": txn_id, "type": txn_type, "reason": "already has pending WorkItem"
+            })
+            continue
+
+        # ── 4e. Determine proposed account, confidence, reason ──────────────
+        proposed_account_id = None
+        proposed_account_name = None
+        confidence = "none"
+        reason = ""
+        rule_type = "CATEGORIZE"
 
         if matched_rule:
             if matched_rule.rule_type == "SKIP":
@@ -695,33 +934,51 @@ def run_categorization_v2(
                     "reason": f"company rule SKIP: {matched_rule.rule_name}",
                 })
                 continue
-            if matched_rule.rule_type == "FLAG":
+            elif matched_rule.rule_type == "FLAG":
                 rule_type = "FLAG"
-                proposed_account_id = None
-                proposed_account_name = None
-                confidence = matched_rule.confidence_strength or "low"
+                confidence = "low"
                 reason = f"Company rule FLAG: {matched_rule.rule_name} — requires manual review."
             else:
+                rule_type = "CLIENT_RULE"
                 proposed_account_id = matched_rule.proposed_account_id
                 proposed_account_name = matched_rule.proposed_account_name
                 confidence = matched_rule.confidence_strength or "high"
                 reason = f"Company rule '{matched_rule.rule_name}' matched → {proposed_account_name}."
         else:
-            # ── 4f. Fall back to global keyword/payee library ───────────────
-            acct_kw, rule_label = _match_rule(payee_name, memo)
-            if acct_kw and rule_label != "no_match":
-                coa_acct = _find_coa_account(accounts, acct_kw)
-                proposed_account_id = coa_acct.get("Id") if coa_acct else None
-                proposed_account_name = coa_acct.get("Name") if coa_acct else acct_kw
-                confidence = "medium"   # keyword match, not a confirmed rule
-                reason = _build_reason(acct_kw, rule_label, payee_name, memo)
+            # No matching company rule — use global keyword library for UNCATEGORIZED/GENERIC
+            if review_type in ("UNCATEGORIZED", "GENERIC_CATEGORY"):
+                acct_kw, _, rule_label = _match_rule(payee_name, memo)
+                if acct_kw and rule_label != "no_match":
+                    # _find_coa_account expects the profile COA (lowercase keys: "id","name","type")
+                    _coa_id, _coa_name, _ = _find_coa_account(
+                        profile.chart_of_accounts or [], acct_kw
+                    )
+                    proposed_account_id = _coa_id
+                    proposed_account_name = _coa_name or acct_kw
+                    confidence = "medium"
+                    reason = _build_reason(acct_kw, rule_label, payee_name, memo)
+                else:
+                    reason = _build_reason(None, "no_match", payee_name, memo)
+            elif review_type == "POSSIBLE_DUPLICATE":
+                rule_type = "FLAG"
+                confidence = "low"
+                reason = (
+                    f"Possible duplicate: another {txn_type} for the same payee and "
+                    f"amount (${_amt_rounded:.2f}) exists within the review window. "
+                    "Verify this is not an accidental double-entry."
+                )
+            elif review_type == "POSSIBLE_TRANSFER":
+                rule_type = "FLAG"
+                confidence = "low"
+                reason = (
+                    f"Possible transfer: a matching amount (${_amt_rounded:.2f}) appears "
+                    "on both sides of the books. Verify this is not a transfer between "
+                    "accounts that should be excluded from P&L."
+                )
             else:
-                proposed_account_id = None
-                proposed_account_name = None
-                confidence = "none"
                 reason = _build_reason(None, "no_match", payee_name, memo)
 
-        # ── 4g. Assess risk and autonomy ─────────────────────────────────────
+        # ── 4f. Assess risk and autonomy ─────────────────────────────────────
         risk = _assess_risk(amount, materiality_limit)
         autonomy_level = classify_autonomy(
             confidence=confidence,
@@ -732,7 +989,7 @@ def run_categorization_v2(
             materiality_limit=materiality_limit,
         )
 
-        # ── 4h. Create WorkItem (DB only — NO QBO write) ────────────────────
+        # ── 4g. Create WorkItem (DB only — NO QBO write) ────────────────────
         wi = WorkItem(
             company_id=company.id,
             realm_id=realm_id,
@@ -769,14 +1026,83 @@ def run_categorization_v2(
     except Exception as exc:
         logger.error("[v2:%s] DB flush error: %s", realm_id, exc)
         diagnostic["api_errors"].append({"type": "DB_FLUSH", "error": str(exc)})
+        _banking_errors.append(f"DB_FLUSH: {exc}")
         db.rollback()
+        # Still update module before returning
+        module_results["BANKING"]["status"] = "FAILED"
+        module_results["BANKING"]["message"] = f"Database flush error: {exc}"
+        module_results["BANKING"]["completed_at"] = _now_iso()
+        diagnostic["engine_status"] = "FAILED"
         return [], diagnostic
 
+    # ── 6. Update BANKING module status (Phase 2) ────────────────────────────
+    module_results["BANKING"]["completed_at"] = _now_iso()
+    module_results["BANKING"]["items_scanned"] = diagnostic["posted_transactions_reviewed"]
+    module_results["BANKING"]["issues_found"] = (
+        diagnostic["items_uncategorized"] + diagnostic["items_needing_review"]
+    )
+    module_results["BANKING"]["work_items_created"] = diagnostic["work_items_created"]
+    module_results["BANKING"]["errors"] = _banking_errors
+    module_results["BANKING"]["warnings"] = _banking_warnings
+
+    if _banking_errors and not _banking_warnings:
+        module_results["BANKING"]["status"] = "PARTIALLY_COMPLETED"
+        module_results["BANKING"]["message"] = (
+            f"{len(_banking_errors)} entity fetch error(s). "
+            f"Scanned {diagnostic['posted_transactions_reviewed']} transactions successfully retrieved."
+        )
+    elif _banking_errors:
+        module_results["BANKING"]["status"] = "COMPLETED_WITH_WARNINGS"
+        module_results["BANKING"]["message"] = (
+            f"{len(_banking_errors)} error(s), {len(_banking_warnings)} warning(s). "
+            f"Scanned {diagnostic['posted_transactions_reviewed']} transactions."
+        )
+    elif _banking_warnings:
+        module_results["BANKING"]["status"] = "COMPLETED_WITH_WARNINGS"
+        module_results["BANKING"]["message"] = (
+            f"{len(_banking_warnings)} warning(s) — see details. "
+            f"Scanned {diagnostic['posted_transactions_reviewed']} transactions."
+        )
+    else:
+        module_results["BANKING"]["status"] = "COMPLETED"
+        module_results["BANKING"]["message"] = (
+            f"Scanned {diagnostic['posted_transactions_reviewed']} posted transactions. "
+            f"{diagnostic['items_uncategorized']} uncategorized · "
+            f"{diagnostic['items_needing_review']} needing review · "
+            f"{diagnostic['items_ok']} OK."
+        )
+
+    # ── 7. Derive overall engine status from module statuses (Phase 2) ───────
+    _active_statuses = [
+        m.get("status") for m in module_results.values()
+        if m.get("status") not in ("NOT_IMPLEMENTED", "NOT_APPLICABLE", "NOT_STARTED")
+    ]
+    if not _active_statuses:
+        diagnostic["engine_status"] = "NO_MODULES_RAN"
+    elif all(s == "COMPLETED" for s in _active_statuses):
+        diagnostic["engine_status"] = "COMPLETED"
+    elif any(s == "FAILED" for s in _active_statuses):
+        # At least one module failed — if any still completed (even partially), mark partial
+        _completed_any = any(
+            s in ("COMPLETED", "COMPLETED_WITH_WARNINGS", "PARTIALLY_COMPLETED")
+            for s in _active_statuses
+        )
+        diagnostic["engine_status"] = "PARTIALLY_COMPLETED" if _completed_any else "FAILED"
+    elif any(s in ("COMPLETED_WITH_WARNINGS", "PARTIALLY_COMPLETED") for s in _active_statuses):
+        diagnostic["engine_status"] = "COMPLETED_WITH_WARNINGS"
+    else:
+        diagnostic["engine_status"] = "COMPLETED"
+
     logger.info(
-        "[v2:%s] Done. uncategorized=%d created=%d errors=%d autonomy=%s",
+        "[v2:%s] Done. reviewed=%d uncategorized=%d needs_review=%d ok=%d "
+        "created=%d not_supported=%d errors=%d autonomy=%s",
         realm_id,
-        diagnostic["uncategorized_count"],
+        diagnostic["posted_transactions_reviewed"],
+        diagnostic["items_uncategorized"],
+        diagnostic["items_needing_review"],
+        diagnostic["items_ok"],
         diagnostic["work_items_created"],
+        len(diagnostic["entities_not_supported"]),
         len(diagnostic["api_errors"]),
         diagnostic["autonomy_breakdown"],
     )

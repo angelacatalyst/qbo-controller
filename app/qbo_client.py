@@ -119,6 +119,140 @@ def revoke_token(token: str) -> bool:
         return False
 
 
+def classify_qbo_error(exc: Exception, entity: str = "") -> tuple[str, str]:
+    """Classify a QBO API exception from a failed entity query.
+
+    Returns (error_class, detail_message) where error_class is one of:
+
+        'entity_not_supported' — Intuit confirmed this entity is unavailable
+                                 for this company's configuration (e.g. Check
+                                 on a non-US company). Safe to skip + retry
+                                 with a fallback entity.
+
+        'auth_error'           — HTTP 401/403 or Intuit auth error code.
+                                 Token may be expired; reconnect required.
+
+        'rate_limit'           — HTTP 429 or Intuit throttling. Back off and
+                                 retry later.
+
+        'temp_error'           — HTTP 5xx. Intuit server error; retry later.
+
+        'malformed_query'      — HTTP 400 with Intuit query-validation code
+                                 (4001 / 4002). The SQL itself is wrong.
+
+        'api_error'            — Catch-all: network error, ambiguous 400,
+                                 unknown response. Requires investigation.
+
+    IMPORTANT — conservative by design:
+        A bare HTTP 400 is NOT classified as entity_not_supported. Intuit's
+        response body must explicitly confirm the entity is unavailable.
+        Anything ambiguous returns 'api_error' so it surfaces for review.
+
+    Args:
+        exc:    The exception raised during a QBO _query() / _get() call.
+        entity: The entity name being queried (e.g. 'Check'), used in the
+                returned detail message.
+
+    Returns:
+        (error_class, detail_message)
+    """
+    try:
+        if not isinstance(exc, requests.exceptions.HTTPError):
+            return "api_error", str(exc)
+
+        response = getattr(exc, "response", None)
+        if response is None:
+            return "api_error", str(exc)
+
+        status = response.status_code
+
+        # ── Auth errors (401 / 403) ───────────────────────────────────────
+        if status in (401, 403):
+            return "auth_error", (
+                f"HTTP {status} — authentication/authorization failure for {entity or 'API call'}. "
+                "Token may be expired or missing required scope. Reconnect QBO."
+            )
+
+        # ── Rate limit (429) ──────────────────────────────────────────────
+        if status == 429:
+            retry_after = response.headers.get("Retry-After", "unknown")
+            return "rate_limit", (
+                f"HTTP 429 — Intuit rate limit exceeded for {entity or 'API call'}. "
+                f"Retry-After: {retry_after}s."
+            )
+
+        # ── Transient server errors (5xx) ─────────────────────────────────
+        if status >= 500:
+            return "temp_error", (
+                f"HTTP {status} — Intuit server error for {entity or 'API call'}. "
+                "This is likely transient; retry later."
+            )
+
+        # ── HTTP 400 — inspect Intuit response body ───────────────────────
+        if status != 400:
+            return "api_error", f"HTTP {status}: {exc}"
+
+        try:
+            body = response.json()
+        except Exception:
+            return "api_error", f"HTTP 400 (unparseable response body): {exc}"
+
+        fault = body.get("Fault", {})
+        errors = fault.get("Error", [])
+
+        for err in errors:
+            code = str(err.get("code", ""))
+            message = (err.get("Message") or "").lower()
+            detail  = (err.get("Detail") or "").lower()
+
+            # ── Intuit error 4000 — entity not supported ──────────────────
+            # "Invalid query — entity type not recognized / not available"
+            if code == "4000":
+                return "entity_not_supported", (
+                    f"{entity}: not a valid query entity for this company "
+                    f"(Intuit error {code}: {err.get('Message', '')})"
+                )
+
+            # ── Intuit error 4001 / 4002 — query validation failure ───────
+            # Malformed SQL (bad field name, invalid operator, etc.)
+            if code in ("4001", "4002"):
+                return "malformed_query", (
+                    f"{entity}: query validation error "
+                    f"(Intuit error {code}: {err.get('Message', '')} — {err.get('Detail', '')})"
+                )
+
+            # ── Explicit "not supported / not available" language ─────────
+            _unsupported_phrases = (
+                "not supported",
+                "not available",
+                "invalid entity",
+                "is not an available",
+                "entity type not supported",
+                "object not found",
+                "unsupported entity",
+            )
+            if any(ph in detail for ph in _unsupported_phrases):
+                return "entity_not_supported", (
+                    f"{entity}: entity not available for this company configuration "
+                    f"(Intuit error {code}: {err.get('Message', '')})"
+                )
+            if any(ph in message for ph in _unsupported_phrases):
+                return "entity_not_supported", (
+                    f"{entity}: entity not available for this company configuration "
+                    f"(Intuit error {code}: {err.get('Message', '')})"
+                )
+
+        # ── Unknown 400 ───────────────────────────────────────────────────
+        error_summary = "; ".join(
+            f"code {e.get('code', '?')}: {e.get('Message', 'unknown')}"
+            for e in errors
+        ) if errors else str(exc)
+        return "api_error", f"HTTP 400 — {error_summary}"
+
+    except Exception:
+        return "api_error", str(exc)
+
+
 # ─── QBO API Client ───────────────────────────────────────────
 
 class QBOClient:
@@ -196,14 +330,59 @@ class QBOClient:
         return resp.json()
 
     def _query(self, db: Session, sql: str) -> list:
-        """Run a QBO SQL-style query."""
+        """Run a QBO SQL-style query (single page, caller controls MAXRESULTS)."""
         data = self._get(db, "/query", {"query": sql, "minorversion": "65"})
         qr = data.get("QueryResponse", {})
-        # Return whatever entity list is in the response
         for key, val in qr.items():
             if isinstance(val, list):
                 return val
         return []
+
+    def _query_all(self, db: Session, sql_base: str, page_size: int = 1000) -> tuple[list, bool, int]:
+        """Paginate through ALL QBO results for a SQL query.
+
+        QBO hard-caps each response at 1,000 records. This method issues
+        successive queries with STARTPOSITION until the last page returns
+        fewer than page_size records, meaning we have everything.
+
+        Args:
+            sql_base:  SQL **without** STARTPOSITION or MAXRESULTS — those
+                       are injected here.  Any existing STARTPOSITION /
+                       MAXRESULTS in sql_base are stripped before use.
+            page_size: Records per request (QBO max = 1000).
+
+        Returns:
+            (records, is_complete, total_fetched)
+            - records:       all fetched records across all pages
+            - is_complete:   True  → last page < page_size (all records retrieved)
+                             False → loop stopped before exhausting results
+                                     (shouldn't happen unless an error is raised)
+            - total_fetched: len(records)
+        """
+        import re as _re
+        # Strip any caller-supplied pagination clauses so we control them fully
+        clean = _re.sub(r'\s+STARTPOSITION\s+\d+', '', sql_base, flags=_re.IGNORECASE)
+        clean = _re.sub(r'\s+MAXRESULTS\s+\d+', '', clean, flags=_re.IGNORECASE).strip()
+
+        all_records: list = []
+        start = 1
+        is_complete = False
+
+        while True:
+            sql = f"{clean} STARTPOSITION {start} MAXRESULTS {page_size}"
+            page = self._query(db, sql)
+            if not page:
+                is_complete = True
+                break
+            all_records.extend(page)
+            if len(page) < page_size:
+                # Last page — we have everything
+                is_complete = True
+                break
+            start += page_size
+            # Safety: if QBO somehow returns 0 next page this loop exits above
+
+        return all_records, is_complete, len(all_records)
 
     def _report(self, db: Session, report_name: str, params: dict = None) -> dict:
         """Fetch a QBO financial report."""
@@ -294,6 +473,69 @@ class QBOClient:
         if start_date:
             sql += f" WHERE TxnDate >= '{start_date}'"
         return self._query(db, sql + " MAXRESULTS 1000")
+
+    def get_checks_with_fallback(self, db: Session, start_date: str = None) -> tuple[list, dict]:
+        """Fetch paper checks with automatic fallback for non-US companies.
+
+        The QBO ``Check`` entity is only available for US companies that have
+        paper check printing enabled.  Non-US companies (and some US
+        configurations) return a 400 / entity_not_supported error.
+
+        Fallback strategy:
+            If Check entity returns entity_not_supported, retry with
+            ``SELECT * FROM Purchase WHERE PaymentType = 'Check'``.
+            These are the same transactions — just stored as Purchase
+            records with PaymentType = 'Check' in QBO's data model.
+
+        NOTE: When the fallback is used, the returned records have the
+        same IDs as records already fetched by get_expenses().  Callers
+        MUST deduplicate by transaction ID before processing.
+
+        Returns:
+            (records, retrieval_info)
+
+            retrieval_info keys:
+                entity_used    : 'Check' | 'Purchase_Check'
+                used_fallback  : bool
+                is_complete    : bool  (False if pagination was truncated)
+                total_fetched  : int
+                fallback_reason: str | None  (the original error detail)
+        """
+        # Build Check SQL (without MAXRESULTS — _query_all handles pagination)
+        check_sql = "SELECT * FROM Check"
+        if start_date:
+            check_sql += f" WHERE TxnDate >= '{start_date}'"
+
+        try:
+            records, is_complete, total = self._query_all(db, check_sql)
+            return records, {
+                "entity_used": "Check",
+                "used_fallback": False,
+                "is_complete": is_complete,
+                "total_fetched": total,
+                "fallback_reason": None,
+            }
+        except Exception as exc:
+            error_class, error_detail = classify_qbo_error(exc, entity="Check")
+            if error_class != "entity_not_supported":
+                # Real error (auth, temp, malformed) — propagate so the
+                # caller's error handler can classify and log it properly.
+                raise
+
+            # ── Check entity not supported → fallback to Purchase(PaymentType='Check') ──
+            fallback_sql = "SELECT * FROM Purchase WHERE PaymentType = 'Check'"
+            if start_date:
+                fallback_sql += f" AND TxnDate >= '{start_date}'"
+
+            # Let fallback errors propagate — caller handles them
+            records, is_complete, total = self._query_all(db, fallback_sql)
+            return records, {
+                "entity_used": "Purchase_Check",
+                "used_fallback": True,
+                "is_complete": is_complete,
+                "total_fetched": total,
+                "fallback_reason": error_detail,
+            }
 
     def get_credit_card_credits(self, db: Session) -> list:
         return self._query(db, "SELECT * FROM CreditCardCredit MAXRESULTS 500")

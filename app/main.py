@@ -1427,30 +1427,82 @@ def run_categorize(
 
     # Log run to ChangeLog
     try:
+        # Primary ENGINE_COMPLETE log
         cl = ChangeLog(
             company_id=company.id,
             realm_id=realm_id,
             entity_type="ENGINE",
             entity_id="categorization_v2",
-            action_type="ENGINE_RUN",
-            description=f"Categorization v2 engine: {diagnostic.get('work_items_created',0)} WorkItems created, {diagnostic.get('uncategorized_count',0)} uncategorized found",
+            action_type="ENGINE_COMPLETE",
+            description=(
+                f"AI Bookkeeper: reviewed={diagnostic.get('posted_transactions_reviewed',0)} "
+                f"uncategorized={diagnostic.get('items_uncategorized',0)} "
+                f"needs_review={diagnostic.get('items_needing_review',0)} "
+                f"ok={diagnostic.get('items_ok',0)} "
+                f"created={diagnostic.get('work_items_created',0)}"
+            ),
             new_value=diagnostic,
         )
         db.add(cl)
+        # BANK_FEED_LIMITATION — always logged (permanent Intuit platform constraint)
+        cl_bf = ChangeLog(
+            company_id=company.id,
+            realm_id=realm_id,
+            entity_type="ENGINE",
+            entity_id="bank_feed",
+            action_type="BANK_FEED_LIMITATION",
+            description=diagnostic.get("bank_feed_note", "Bank Feed not accessible via QBO API v3"),
+            new_value={"bank_feed_limitation": True},
+        )
+        db.add(cl_bf)
+        # ENTITY_NOT_SUPPORTED — one entry per entity that Intuit confirmed unsupported
+        for ens in diagnostic.get("entities_not_supported", []):
+            cl_ens = ChangeLog(
+                company_id=company.id,
+                realm_id=realm_id,
+                entity_type="ENGINE",
+                entity_id=ens.get("entity", "unknown"),
+                action_type="ENTITY_NOT_SUPPORTED",
+                description=ens.get("reason", "Entity not supported by Intuit for this company"),
+                new_value=ens,
+            )
+            db.add(cl_ens)
+        # API_ERROR — one entry per real error
+        for ae in diagnostic.get("api_errors", []):
+            cl_ae = ChangeLog(
+                company_id=company.id,
+                realm_id=realm_id,
+                entity_type="ENGINE",
+                entity_id=ae.get("type", "unknown"),
+                action_type="API_ERROR",
+                description=ae.get("error", "Unknown API error"),
+                new_value=ae,
+            )
+            db.add(cl_ae)
         db.commit()
     except Exception:
         pass
 
     created = diagnostic.get("work_items_created", len(work_items))
-    uncategorized = diagnostic.get("uncategorized_count", 0)
+    reviewed = diagnostic.get("posted_transactions_reviewed", 0)
+    uncategorized = diagnostic.get("items_uncategorized", 0)
+    needs_review = diagnostic.get("items_needing_review", 0)
+    items_ok = diagnostic.get("items_ok", 0)
+    not_supported = len(diagnostic.get("entities_not_supported", []))
     errors = len(diagnostic.get("api_errors", []))
     breakdown = diagnostic.get("autonomy_breakdown", {})
 
+    engine_status = diagnostic.get("engine_status", "COMPLETED")
+    module_results = diagnostic.get("module_results", {})
+
     summary_parts = [
-        f"Engine run complete",
-        f"{uncategorized} uncategorized found",
+        f"Engine: {engine_status}",
+        f"{reviewed} posted transactions reviewed",
+        f"{uncategorized} uncategorized · {needs_review} needing review · {items_ok} OK",
         f"{created} WorkItems created",
     ]
+    if not_supported:
+        summary_parts.append(f"{not_supported} entity type(s) not supported by Intuit")
     if errors:
         summary_parts.append(f"{errors} API error(s)")
     summary = " · ".join(summary_parts)
@@ -1458,12 +1510,21 @@ def run_categorize(
     import json, urllib.parse
     diag_json = urllib.parse.quote(json.dumps({
         "created": created,
+        "reviewed": reviewed,
         "uncategorized": uncategorized,
+        "needs_review": needs_review,
+        "items_ok": items_ok,
+        "not_supported": not_supported,
         "errors": errors,
         "breakdown": breakdown,
+        "entities_not_supported": diagnostic.get("entities_not_supported", []),
         "api_errors": diagnostic.get("api_errors", []),
+        "bank_feed_limitation": diagnostic.get("bank_feed_limitation", True),
+        "bank_feed_note": diagnostic.get("bank_feed_note", ""),
         "qbo_writes": diagnostic.get("qbo_writes", 0),
-    }))
+        "engine_status": engine_status,
+        "module_results": module_results,
+    }, default=str))
 
     return RedirectResponse(
         url=f"/company/{realm_id}/bookkeeping?saved={urllib.parse.quote(summary)}&diagnostic={diag_json}",
