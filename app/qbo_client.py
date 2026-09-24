@@ -75,6 +75,35 @@ def refresh_access_token(refresh_token: str) -> dict:
     }
 
 
+def fetch_company_name(access_token: str, realm_id: str, environment: str = "sandbox") -> str | None:
+    """
+    Fetch the real QBO company name immediately after OAuth, before a Company
+    object exists. Returns None on failure (non-fatal — display name used instead).
+    No DB writes — READ ONLY.
+    """
+    try:
+        base = (
+            "https://quickbooks.api.intuit.com"
+            if environment == "production"
+            else "https://sandbox-quickbooks.api.intuit.com"
+        )
+        url = f"{base}/v3/company/{realm_id}/companyinfo/{realm_id}"
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("CompanyInfo", {}).get("CompanyName")
+    except Exception:
+        pass
+    return None
+
+
 def revoke_token(token: str) -> bool:
     """Revoke a QBO token (disconnect)."""
     try:
