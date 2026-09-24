@@ -137,7 +137,7 @@
 
             {# Remove (soft) #}
             <form method="post" action="/company/{{ co.realm_id }}/remove" class="d-inline"
-                  onsubmit="return confirm('Remove {{ (co.qbo_company_name or co.company_name)|replace(\"'\", \"\\'\")|replace('\"', '&quot;') }} from the workspace? All accounting data is preserved.')">
+                  onsubmit="return confirm('Remove this company from the workspace? All accounting data is preserved.')">
               <button type="submit" class="btn btn-sm btn-outline-danger" title="Remove from workspace">
                 <i class="bi bi-x-lg"></i>
               </button>
