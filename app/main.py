@@ -27,7 +27,7 @@ from app.database import (
 from app.security import decrypt_token, encrypt_token
 from app.qbo_client import (
     QBOClient, build_auth_url, exchange_code_for_tokens,
-    revoke_token, sync_company_data
+    fetch_company_name, revoke_token, sync_company_data
 )
 from app.accounting import (
     calculate_health_score, create_month_end_close, generate_audit_readiness,
@@ -64,6 +64,22 @@ templates.env.cache = None  # Disable LRU cache to avoid unhashable type errors
 
 # In-memory OAuth state store (use Redis in production)
 _oauth_states: dict = {}
+# Pending connections awaiting user confirmation {realm_id: {client_id, qbo_company_name, ...}}
+_pending_connections: dict = {}
+
+
+def _token_status(company: Company) -> str:
+    """Return 'connected' | 'expiring' | 'expired' | 'disconnected'."""
+    if company.connection_status != "connected":
+        return "disconnected"
+    if not company.token_expires_at:
+        return "connected"
+    now = datetime.utcnow()
+    if now >= company.token_expires_at:
+        return "expired"
+    if now >= company.token_expires_at - timedelta(days=7):
+        return "expiring"
+    return "connected"
 
 
 @app.on_event("startup")
@@ -149,7 +165,37 @@ def get_profile(db: Session, realm_id: str) -> Optional[CompanyProfile]:
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
-    return RedirectResponse(url="/clients", status_code=302)
+    """Home — QBO Companies list (multi-company workspace)."""
+    companies = (
+        db.query(Company)
+        .filter(Company.connection_status != "removed")
+        .order_by(Company.company_name)
+        .all()
+    )
+    company_rows = []
+    for co in companies:
+        ts = _token_status(co)
+        pending_count = db.query(WorkItem).filter(
+            WorkItem.realm_id == co.realm_id,
+            WorkItem.status == "pending",
+        ).count()
+        company_rows.append({
+            "company": co,
+            "token_status": ts,
+            "pending_items": pending_count,
+        })
+
+    active_company = next((r for r in company_rows if r["company"].is_active), None)
+
+    return templates.TemplateResponse(request, "qbo_companies.html", {
+        "company_rows": company_rows,
+        "active_company": active_company,
+        "connected_count": sum(1 for r in company_rows if r["token_status"] == "connected"),
+        "total_count": len(company_rows),
+        "app_name": settings.APP_NAME,
+        "environment": settings.QBO_ENVIRONMENT,
+        "has_credentials": bool(settings.QBO_CLIENT_ID and settings.QBO_CLIENT_SECRET),
+    })
 
 
 # ─── CLIENT MANAGEMENT ────────────────────────────────────────
@@ -163,8 +209,14 @@ def list_clients(request: Request, db: Session = Depends(get_db)):
     for client in clients_db:
         # Get all companies associated with this client
         companies_for_client = db.query(Company).filter(Company.client_id == client.id).all()
-        # Pick the first connected one, or just first
-        company = next((c for c in companies_for_client if c.connection_status == "connected"), None)
+
+        # Pick active company: prefer client.active_realm_id, else first connected, else first
+        active_realm = client.active_realm_id
+        company = None
+        if active_realm:
+            company = next((c for c in companies_for_client if c.realm_id == active_realm), None)
+        if not company:
+            company = next((c for c in companies_for_client if c.connection_status == "connected"), None)
         if not company and companies_for_client:
             company = companies_for_client[0]
 
@@ -177,11 +229,24 @@ def list_clients(request: Request, db: Session = Depends(get_db)):
             ).count()
             workspace_url = f"/company/{company.realm_id}"
 
+        # Token status for primary company
+        token_status = _token_status(company) if company else "disconnected"
+
+        # Token statuses for additional companies
+        extra_token_statuses = {}
+        for co in companies_for_client:
+            if company and co.realm_id != company.realm_id:
+                extra_token_statuses[co.realm_id] = _token_status(co)
+
         rows.append({
             "client": client,
             "company": company,
+            "all_companies": companies_for_client,
             "pending_items": pending_items,
             "workspace_url": workspace_url,
+            "token_status": token_status,
+            "extra_token_statuses": extra_token_statuses,
+            "is_active_company": (company and company.realm_id == active_realm) if active_realm else False,
         })
 
     # Orphan companies (no client_id)
@@ -388,12 +453,11 @@ def qbo_connect_form(request: Request):
 @app.post("/qbo/connect")
 def qbo_initiate_oauth(
     request: Request,
-    company_name: str = Form(...),
     client_id: str = Form(default=""),
 ):
+    """Initiate QBO OAuth. Company name is NOT supplied by user — comes from QBO after auth."""
     state = secrets.token_urlsafe(32)
     _oauth_states[state] = {
-        "company_name": company_name,
         "client_id": client_id.strip() or None,
         "created_at": datetime.utcnow(),
     }
@@ -417,7 +481,6 @@ def qbo_oauth_callback(
         raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF attack")
 
     state_data = _oauth_states.pop(state)
-    company_name = state_data.get("company_name", "Unknown Company")
     client_id_from_state = state_data.get("client_id")
 
     if not code or not realmId:
@@ -431,25 +494,29 @@ def qbo_oauth_callback(
 
     expires_at = datetime.utcnow() + timedelta(seconds=tokens.get("expires_in", 3600))
 
-    # Check if this company is already connected
+    # Fetch real company name from QBO (READ-ONLY — no QBO write)
+    real_company_name = fetch_company_name(
+        tokens["access_token"], realmId, settings.QBO_ENVIRONMENT
+    ) or "Unknown Company"
+
+    # Save or update Company record (tokens + real name)
     existing = db.query(Company).filter_by(realm_id=realmId).first()
     if existing:
-        # Update tokens
         existing.access_token_enc = encrypt_token(tokens["access_token"])
         existing.refresh_token_enc = encrypt_token(tokens["refresh_token"])
         existing.token_expires_at = expires_at
         existing.connection_status = "connected"
         existing.qbo_environment = settings.QBO_ENVIRONMENT
-        # Associate with client if coming from client flow and not yet associated
-        if client_id_from_state and not existing.client_id:
-            existing.client_id = client_id_from_state
+        existing.qbo_company_name = real_company_name
+        existing.company_name = real_company_name  # keep display name in sync
         db.commit()
         company = existing
+        is_reconnect = True
     else:
-        # Create new company workspace
         company = Company(
             realm_id=realmId,
-            company_name=company_name,
+            company_name=real_company_name,
+            qbo_company_name=real_company_name,
             qbo_environment=settings.QBO_ENVIRONMENT,
             access_token_enc=encrypt_token(tokens["access_token"]),
             refresh_token_enc=encrypt_token(tokens["refresh_token"]),
@@ -459,28 +526,181 @@ def qbo_oauth_callback(
         )
         db.add(company)
         db.commit()
-
-        # Create empty profile
-        profile = CompanyProfile(
-            company_id=company.id,
-            realm_id=realmId,
-        )
+        profile = CompanyProfile(company_id=company.id, realm_id=realmId)
         db.add(profile)
         db.commit()
+        is_reconnect = False
 
-    # Log the connection
+    # Auto-activate if no company is currently active
+    if not db.query(Company).filter(Company.is_active == True).first():  # noqa: E712
+        company.is_active = True
+
+    action = "qbo_reconnect" if is_reconnect else "qbo_connect"
     log = ChangeLog(
         company_id=company.id,
         realm_id=realmId,
-        action_type="qbo_connect",
-        description=f"QBO company connected: {company_name} (Realm: {realmId})",
+        action_type=action,
+        description=f"QBO company connected: {real_company_name} (Realm: {realmId})",
         human_approval=True,
     )
     db.add(log)
     db.commit()
 
-    redirect_url = f"/company/{realmId}?connected=1"
-    return RedirectResponse(url=redirect_url, status_code=302)
+    suffix = "reconnected=1" if is_reconnect else "connected=1"
+    return RedirectResponse(url=f"/company/{realmId}?{suffix}", status_code=302)
+
+
+@app.get("/qbo/confirm", response_class=HTMLResponse)
+def qbo_confirm_page(
+    request: Request,
+    realm_id: str = Query(...),
+    client_id: str = Query(default=""),
+    db: Session = Depends(get_db),
+):
+    """Show confirmation page after OAuth: Client Name + QBO Company Name + Realm ID."""
+    pending = _pending_connections.get(realm_id)
+    company = db.query(Company).filter_by(realm_id=realm_id).first()
+
+    qbo_company_name = (
+        (pending or {}).get("qbo_company_name")
+        or (company.qbo_company_name if company else None)
+        or "Unknown Company"
+    )
+
+    effective_client_id = client_id.strip() or (pending or {}).get("client_id") or ""
+    client = db.query(Client).filter_by(id=effective_client_id).first() if effective_client_id else None
+    all_clients = db.query(Client).filter(Client.status != "deleted").order_by(Client.client_name).all()
+
+    return templates.TemplateResponse(request, "qbo_confirm.html", {
+        "realm_id": realm_id,
+        "qbo_company_name": qbo_company_name,
+        "client": client,
+        "all_clients": all_clients,
+        "app_name": settings.APP_NAME,
+    })
+
+
+@app.post("/qbo/confirm")
+def qbo_confirm_connection(
+    request: Request,
+    realm_id: str = Form(...),
+    client_id: str = Form(default=""),
+    db: Session = Depends(get_db),
+):
+    """Finalize QBO ↔ Client association after confirmation."""
+    company = db.query(Company).filter_by(realm_id=realm_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found — OAuth may have expired")
+
+    effective_client_id = client_id.strip() or None
+
+    if effective_client_id:
+        company.client_id = effective_client_id
+        # Set as active realm for this client if they have none yet
+        client = db.query(Client).filter_by(id=effective_client_id).first()
+        if client and not client.active_realm_id:
+            client.active_realm_id = realm_id
+
+    db.commit()
+
+    # Clear pending
+    _pending_connections.pop(realm_id, None)
+
+    log = ChangeLog(
+        company_id=company.id,
+        realm_id=realm_id,
+        action_type="qbo_connect",
+        description=f"QBO company confirmed: {company.qbo_company_name or company.company_name} (Realm: {realm_id})",
+        human_approval=True,
+    )
+    db.add(log)
+    db.commit()
+
+    return RedirectResponse(url=f"/company/{realm_id}?connected=1", status_code=302)
+
+
+@app.post("/clients/{client_id}/set-active/{realm_id}")
+def set_active_realm(client_id: str, realm_id: str, db: Session = Depends(get_db)):
+    """Set which QBO company is the active workspace for a client."""
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    # Verify the company belongs to this client
+    company = db.query(Company).filter_by(realm_id=realm_id, client_id=client_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found or not linked to this client")
+    client.active_realm_id = realm_id
+    db.commit()
+    return RedirectResponse(url=f"/clients?active_set=1", status_code=302)
+
+
+@app.post("/company/{realm_id}/remove-client-link")
+def remove_client_link(realm_id: str, db: Session = Depends(get_db)):
+    """Unlink a QBO company from its client WITHOUT deleting any data."""
+    company = get_company_or_404(db, realm_id)
+    old_client_id = company.client_id
+    company.client_id = None
+    # If the client had this as active, clear it
+    if old_client_id:
+        client = db.query(Client).filter_by(id=old_client_id).first()
+        if client and client.active_realm_id == realm_id:
+            # Try to find another connected company for this client
+            alt = db.query(Company).filter(
+                Company.client_id == old_client_id,
+                Company.realm_id != realm_id,
+                Company.connection_status == "connected",
+            ).first()
+            client.active_realm_id = alt.realm_id if alt else None
+    log = ChangeLog(
+        company_id=company.id,
+        realm_id=realm_id,
+        action_type="client_unlinked",
+        description=f"QBO company unlinked from client (realm: {realm_id}). Data preserved.",
+        human_approval=True,
+    )
+    db.add(log)
+    db.commit()
+    return RedirectResponse(url="/clients?unlinked=1", status_code=302)
+
+
+@app.post("/company/{realm_id}/assign-client")
+def assign_client_to_company(
+    realm_id: str,
+    client_id: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Assign an orphan QBO company to a client."""
+    company = get_company_or_404(db, realm_id)
+    client = db.query(Client).filter_by(id=client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    company.client_id = client_id
+    if not client.active_realm_id:
+        client.active_realm_id = realm_id
+    log = ChangeLog(
+        company_id=company.id,
+        realm_id=realm_id,
+        action_type="client_assigned",
+        description=f"Orphan QBO company assigned to client: {client.client_name}",
+        human_approval=True,
+    )
+    db.add(log)
+    db.commit()
+    return RedirectResponse(url=f"/clients?assigned=1", status_code=302)
+
+
+@app.get("/qbo/reconnect/{realm_id}")
+def qbo_reconnect(realm_id: str, db: Session = Depends(get_db)):
+    """Re-initiate OAuth for an expired/disconnected company. Preserves client_id."""
+    company = get_company_or_404(db, realm_id)
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = {
+        "client_id": company.client_id,
+        "realm_id": realm_id,  # hint: this is a reconnect, not new
+        "created_at": datetime.utcnow(),
+    }
+    auth_url = build_auth_url(state)
+    return RedirectResponse(url=auth_url, status_code=302)
 
 
 @app.post("/qbo/disconnect/{realm_id}")
@@ -499,6 +719,36 @@ def qbo_disconnect(realm_id: str, db: Session = Depends(get_db)):
         realm_id=realm_id,
         action_type="qbo_disconnect",
         description=f"QBO company disconnected: {company.company_name}",
+        human_approval=True,
+    )
+    db.add(log)
+    db.commit()
+    return RedirectResponse(url="/", status_code=302)
+
+
+@app.post("/company/{realm_id}/set-active")
+def set_company_active(realm_id: str, db: Session = Depends(get_db)):
+    """Set this company as the active workspace. Clears is_active on all others."""
+    company = get_company_or_404(db, realm_id)
+    # Clear all active flags
+    db.query(Company).update({Company.is_active: False})
+    # Set this one active
+    company.is_active = True
+    db.commit()
+    return RedirectResponse(url="/", status_code=302)
+
+
+@app.post("/company/{realm_id}/remove")
+def remove_company(realm_id: str, db: Session = Depends(get_db)):
+    """Soft-remove a QBO company from the workspace. Does NOT delete any accounting data."""
+    company = get_company_or_404(db, realm_id)
+    company.connection_status = "removed"
+    company.is_active = False
+    log = ChangeLog(
+        company_id=company.id,
+        realm_id=realm_id,
+        action_type="qbo_removed",
+        description=f"QBO company removed from workspace: {company.company_name} (Realm: {realm_id}). Data preserved.",
         human_approval=True,
     )
     db.add(log)
