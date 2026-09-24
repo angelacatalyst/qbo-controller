@@ -56,6 +56,8 @@ class Client(Base):
     phone = Column(String(50))
     notes = Column(Text)
     status = Column(String(20), default="active")   # active | inactive | prospect
+    # Which realm_id is the "active" workspace for this client (when multiple QBO companies)
+    active_realm_id = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -92,6 +94,9 @@ class Company(Base):
 
     # Company type — used to activate restaurant-specific features
     company_type = Column(String(30), default="standard")   # standard | restaurant
+
+    # Active workspace flag — only one Company should have is_active=True at a time
+    is_active = Column(Boolean, default=False)
 
     # Client linkage (nullable — existing companies without a client are still valid)
     client_id = Column(String(36), ForeignKey("clients.id"), nullable=True, index=True)
@@ -732,6 +737,10 @@ def _run_migrations():
         "ALTER TABLE company_profiles ADD COLUMN IF NOT EXISTS materiality_limit FLOAT DEFAULT 2500",
         # Client linkage on companies (nullable — preserves existing connections)
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS client_id VARCHAR(36)",
+        # Active realm tracking on clients
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS active_realm_id VARCHAR(100)",
+        # Phase 2.6: active workspace flag on companies (multi-company support)
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT FALSE",
     ]
     with engine.connect() as conn:
         for sql in migrations:
