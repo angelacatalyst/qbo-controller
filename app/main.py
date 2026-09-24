@@ -97,6 +97,7 @@ def startup():
     import sqlalchemy as _sa
     _migrations = [
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_type VARCHAR(30) DEFAULT 'standard'",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT FALSE",
     ]
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as _conn:
