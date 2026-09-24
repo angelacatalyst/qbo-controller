@@ -6,9 +6,11 @@
   <div class="col-md-7 col-lg-6">
     <div class="card border-0 shadow-sm">
       <div class="card-header bg-white py-4 border-bottom text-center">
-        <i class="bi bi-plus-circle-fill text-primary" style="font-size:32px;"></i>
-        <h5 class="mt-2 mb-0 fw-bold">Connect New QBO Company</h5>
-        <p class="text-muted small mt-1 mb-0">A new isolated workspace will be created for this company.</p>
+        <i class="bi bi-plug-fill text-primary" style="font-size:32px;"></i>
+        <h5 class="mt-2 mb-0 fw-bold">Connect QuickBooks Online</h5>
+        <p class="text-muted small mt-1 mb-0">
+          You'll sign in to QBO — the company name comes from Intuit automatically.
+        </p>
       </div>
       <div class="card-body p-4">
 
@@ -20,7 +22,7 @@
             <li>Go to <a href="https://developer.intuit.com" target="_blank">developer.intuit.com</a></li>
             <li>Sign in with your Intuit account</li>
             <li>Create a new app (choose QuickBooks Online)</li>
-            <li>Under <strong>Keys & Credentials</strong>, copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+            <li>Under <strong>Keys &amp; Credentials</strong>, copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
             <li>Under <strong>Redirect URIs</strong>, add: <code>http://localhost:8000/qbo/callback</code></li>
             <li>Add these to your <code>.env</code> file and restart the server</li>
           </ol>
@@ -31,31 +33,33 @@
         <div class="alert alert-info mb-4 py-2">
           <small>
             <i class="bi bi-info-circle me-1"></i>
-            <strong>Current Environment:</strong> {{ environment | upper }}
+            <strong>Environment:</strong> {{ environment | upper }}
             {% if environment == 'sandbox' %}
-            — Connecting to QBO Sandbox. For production companies, change <code>QBO_ENVIRONMENT=production</code> in your <code>.env</code> file.
+            — Sandbox mode. For real companies, change <code>QBO_ENVIRONMENT=production</code> in <code>.env</code>.
             {% else %}
-            — Connecting to Production QBO. Real company data.
+            — <strong>Production.</strong> Real company data.
             {% endif %}
           </small>
         </div>
 
         {% if client %}
-        <div class="alert alert-info d-flex align-items-center gap-2 mb-3 py-2">
+        <div class="alert alert-primary d-flex align-items-center gap-2 mb-4 py-2">
           <i class="bi bi-person-circle" style="color:#6366f1;"></i>
-          <div class="small">Connecting QBO for client: <strong>{{ client.client_name }}</strong></div>
+          <div class="small">
+            Connecting QBO for client: <strong>{{ client.client_name }}</strong>
+          </div>
         </div>
         {% endif %}
+
         <form method="post" action="/qbo/connect">
           {% if client %}
           <input type="hidden" name="client_id" value="{{ client.id }}">
           {% endif %}
-          <div class="mb-4">
-            <label class="form-label fw-semibold">Company Display Name</label>
-            <input type="text" name="company_name" class="form-control form-control-lg"
-                   placeholder="e.g. Affordable Metal Inc." required
-                   value="{{ prefill_name or '' }}">
-            <div class="form-text">This is just the display name. The actual company name will be pulled from QBO after authorization.</div>
+
+          <!-- No company name field — name comes from QBO after OAuth -->
+          <div class="alert alert-light border mb-4 py-2" style="font-size:13px;">
+            <i class="bi bi-magic me-1 text-primary"></i>
+            <strong>No typing required.</strong> After you authorize, we'll automatically pull the company name from QuickBooks.
           </div>
 
           <div class="d-grid">
@@ -75,19 +79,26 @@
         <!-- How it works -->
         <div class="small text-muted">
           <div class="fw-semibold mb-2 text-dark">How This Works</div>
-          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">1</span> You enter the company name and click Authorize</div>
-          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">2</span> Intuit's secure login page opens — you sign in with the QBO company's credentials</div>
-          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">3</span> You grant permission — QBO redirects back with a secure authorization code</div>
-          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">4</span> An isolated workspace is created with the company's Realm ID as the unique identifier</div>
-          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">5</span> Run a Sync to load accounting data, then run an Assessment</div>
-          <div class="mt-3 text-muted" style="font-size:11px;">
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">1</span> Click Authorize — Intuit's secure login page opens</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">2</span> Sign in with the QBO company's credentials and grant permission</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">3</span> We fetch the real company name from QuickBooks automatically</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">4</span> You land directly in the company workspace — ready to go</div>
+          <div class="d-flex gap-2 mb-2"><span class="badge bg-primary">5</span> Run a Sync, then an Assessment to start AI bookkeeping</div>
+          <div class="mt-3" style="font-size:11px;">
             <i class="bi bi-shield-lock-fill me-1 text-success"></i>
-            Your QBO password is never entered into or stored by this application. Authorization uses OAuth 2.0.
-            Tokens are encrypted before storage. Each company's data is fully isolated by Realm ID.
+            Your QBO password is never entered into or stored by this app. OAuth 2.0 only.
+            Tokens are encrypted. Each company is fully isolated by Realm ID.
+            <strong>No QBO writes are performed during connection.</strong>
           </div>
         </div>
 
       </div>
+    </div>
+
+    <div class="text-center mt-3">
+      <a href="/" class="btn btn-link text-muted btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Back to QBO
+      </a>
     </div>
   </div>
 </div>
