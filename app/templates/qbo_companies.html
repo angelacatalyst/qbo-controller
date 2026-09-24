@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}QBO Companies — {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-9">
+
+    {# ── Header ── #}
+    <div class="d-flex align-items-center justify-content-between mb-4">
+      <div>
+        <h4 class="fw-bold mb-1">
+          <i class="bi bi-buildings text-primary me-2"></i>QuickBooks Online
+        </h4>
+        <p class="text-muted mb-0 small">
+          {% if total_count == 0 %}
+            No companies connected yet
+          {% elif total_count == 1 %}
+            1 company connected — click to set active
+          {% else %}
+            {{ total_count }} companies connected — click to set active
+          {% endif %}
+        </p>
+      </div>
+      <div class="d-flex gap-2">
+        <a href="/clients" class="btn btn-outline-secondary btn-sm">
+          <i class="bi bi-people me-1"></i>Client Portfolio
+        </a>
+      </div>
+    </div>
+
+    {# ── Flash messages ── #}
+    {% if request.query_params.get('connected') %}
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+      <i class="bi bi-check-circle-fill me-2"></i>
+      <strong>Connected!</strong> New QBO company added to your workspace.
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+    {% if request.query_params.get('reconnected') %}
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+      <i class="bi bi-arrow-repeat me-2"></i>
+      <strong>Reconnected!</strong> QBO tokens refreshed successfully.
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+    {% if request.query_params.get('error') %}
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+      <i class="bi bi-exclamation-triangle-fill me-2"></i>
+      <strong>QBO Error:</strong> {{ request.query_params.get('error') }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+
+    {# ── Environment note ── #}
+    {% if environment == 'sandbox' %}
+    <div class="alert alert-warning py-2 mb-4" style="font-size:13px;">
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      <strong>Sandbox mode.</strong> For real companies, set <code>QBO_ENVIRONMENT=production</code> in <code>.env</code> and restart.
+    </div>
+    {% endif %}
+
+    {# ── Companies list ── #}
+    {% if company_rows %}
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-body p-0">
+        {% for row in company_rows %}
+        {% set co = row.company %}
+        {% set ts = row.token_status %}
+        <div class="d-flex align-items-center gap-3 px-4 py-3 {% if not loop.last %}border-bottom{% endif %}
+                    {% if co.is_active %}bg-primary bg-opacity-10{% endif %}">
+
+          {# Status chip #}
+          <div class="flex-shrink-0" style="width:110px;">
+            {% if ts == 'connected' %}
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
+              🟢 Connected
+            </span>
+            {% elif ts == 'expiring' %}
+            <span class="badge bg-warning-subtle text-warning border border-warning-subtle px-2 py-1">
+              🟠 Expiring
+            </span>
+            {% elif ts == 'expired' %}
+            <span class="badge bg-danger-subtle text-danger border border-danger-subtle px-2 py-1">
+              🔴 Expired
+            </span>
+            {% else %}
+            <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1">
+              ⚪ Disconnected
+            </span>
+            {% endif %}
+          </div>
+
+          {# Company info #}
+          <div class="flex-grow-1 min-w-0">
+            <div class="fw-semibold text-truncate">
+              {{ co.qbo_company_name or co.company_name }}
+              {% if co.is_active %}
+              <span class="badge bg-primary ms-2" style="font-size:10px;">Active</span>
+              {% endif %}
+            </div>
+            <div class="text-muted" style="font-size:11px;">
+              Realm: <code>{{ co.realm_id }}</code>
+              {% if co.client %}
+              · <i class="bi bi-person-circle"></i> {{ co.client.client_name }}
+              {% endif %}
+              {% if row.pending_items > 0 %}
+              · <span class="badge bg-warning text-dark ms-1">{{ row.pending_items }} pending</span>
+              {% endif %}
+            </div>
+          </div>
+
+          {# Actions #}
+          <div class="d-flex gap-2 flex-shrink-0">
+            {# Open workspace #}
+            {% if ts in ['connected', 'expiring'] %}
+            <a href="/company/{{ co.realm_id }}" class="btn btn-sm btn-outline-primary">
+              <i class="bi bi-box-arrow-in-right me-1"></i>Open
+            </a>
+            {% endif %}
+
+            {# Set Active (only if not already active) #}
+            {% if not co.is_active %}
+            <form method="post" action="/company/{{ co.realm_id }}/set-active" class="d-inline">
+              <button type="submit" class="btn btn-sm btn-outline-secondary"
+                      title="Set as active workspace">
+                <i class="bi bi-check2-circle me-1"></i>Set Active
+              </button>
+            </form>
+            {% endif %}
+
+            {# Reconnect if expired/disconnected #}
+            {% if ts in ['expired', 'disconnected'] %}
+            <a href="/qbo/reconnect/{{ co.realm_id }}" class="btn btn-sm btn-warning">
+              <i class="bi bi-arrow-repeat me-1"></i>Reconnect
+            </a>
+            {% endif %}
+
+            {# Remove (soft) #}
+            <form method="post" action="/company/{{ co.realm_id }}/remove" class="d-inline"
+                  onsubmit="return confirm('Remove {{ (co.qbo_company_name or co.company_name)|replace(\"'\", \"\\'\")|replace('\"', '&quot;') }} from the workspace? All accounting data is preserved.')">
+              <button type="submit" class="btn btn-sm btn-outline-danger" title="Remove from workspace">
+                <i class="bi bi-x-lg"></i>
+              </button>
+            </form>
+          </div>
+
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    {# Empty state #}
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-body text-center py-5">
+        <i class="bi bi-cloud-slash text-muted" style="font-size:48px;"></i>
+        <h5 class="mt-3 text-muted">No companies connected</h5>
+        <p class="text-muted small mb-0">Connect your first QuickBooks Online company below.</p>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── Connect another company ── #}
+    <div class="card border-0 shadow-sm">
+      <div class="card-body px-4 py-3">
+        <div class="d-flex align-items-center gap-3">
+          <i class="bi bi-plug-fill text-primary" style="font-size:24px;"></i>
+          <div class="flex-grow-1">
+            <div class="fw-semibold">Connect another company</div>
+            <div class="text-muted small">
+              Intuit will show you a company selector — no typing required.
+              {% if not has_credentials %}
+              <span class="text-danger ms-1"><i class="bi bi-exclamation-triangle-fill"></i> QBO credentials missing in .env</span>
+              {% endif %}
+            </div>
+          </div>
+          <form method="post" action="/qbo/connect">
+            <button type="submit" class="btn btn-primary"
+                    {% if not has_credentials %}disabled{% endif %}>
+              <i class="bi bi-box-arrow-up-right me-2"></i>Authorize with QuickBooks
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    {# ── Security note ── #}
+    <div class="text-center mt-3">
+      <small class="text-muted">
+        <i class="bi bi-shield-lock-fill text-success me-1"></i>
+        OAuth 2.0 — your QBO password is never entered or stored here.
+        Tokens are encrypted. Each company is isolated by Realm ID.
+        <strong>No QBO writes during connection.</strong>
+      </small>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
