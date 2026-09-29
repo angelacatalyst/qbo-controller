@@ -3,14 +3,14 @@
 
 {% block content %}
 <!-- COMPANY CONTEXT HEADER -->
-<div class="card border-0 mb-4" style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px;">
+<div class="card border-0 mb-4 hero-panel">
   <div class="card-body p-4 text-white">
     <div class="row align-items-center">
       <div class="col">
         <div class="text-uppercase small mb-1" style="color:#94a3b8;letter-spacing:.08em;">CURRENT COMPANY WORKSPACE</div>
         <h4 class="mb-1 fw-bold">{{ company.company_name }}</h4>
         <div class="d-flex flex-wrap gap-3 mt-2 small" style="color:#94a3b8;">
-          <span><i class="bi bi-key me-1"></i>Realm ID: <code style="color:#60a5fa;">{{ company.realm_id }}</code></span>
+          <span><i class="bi bi-key me-1"></i>Realm ID: <code>{{ company.realm_id }}</code></span>
           <span><i class="bi bi-link-45deg me-1"></i>
             {% if company.connection_status == 'connected' %}<span class="text-success">● Connected</span>{% else %}<span class="text-muted">● Disconnected</span>{% endif %}
           </span>

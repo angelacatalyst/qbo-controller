@@ -6,22 +6,32 @@
   <title>{% block title %}AI Bookkeeper{% endblock %}</title>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,650&family=Outfit:wght@380;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --sidebar-bg: #0d1117;
-      --sidebar-w: 248px;
-      --accent: #2563eb;
-      --success: #16a34a;
-      --warning: #d97706;
-      --danger: #dc2626;
-      --body-bg: #f1f5f9;
-      --card-bg: #ffffff;
-      --border: #e2e8f0;
-      --muted: #64748b;
-      --header-h: 52px;
+      --sidebar-bg: #141210;
+      --sidebar-w: 256px;
+      --accent: #d6ff4a;
+      --ink: #1c1916;
+      --success: #2f6b45;
+      --warning: #a15c1d;
+      --danger: #9f2d2d;
+      --body-bg: #f4f0e8;
+      --card-bg: #fffcf7;
+      --border: #e4ddd0;
+      --muted: #6f675e;
+      --header-h: 58px;
     }
     * { box-sizing: border-box; }
-    body { background: var(--body-bg); font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; }
+    body {
+      background:
+        radial-gradient(900px 420px at 100% -10%, rgba(214,255,74,.28), transparent 55%),
+        var(--body-bg);
+      font-family: "Outfit", system-ui, sans-serif;
+      color: var(--ink);
+      margin: 0;
+      letter-spacing: -0.01em;
+    }
 
     /* ── Sidebar ─────────────────────────────────────────────── */
     #sidebar {
@@ -34,13 +44,13 @@
       display: flex; align-items: center; gap: 10px;
     }
     .sb-brand .logo {
-      width: 32px; height: 32px; background: linear-gradient(135deg, #2563eb, #7c3aed);
-      border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      width: 34px; height: 34px; background: var(--accent); color: var(--ink);
+      border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
-    .sb-brand .logo i { color: #fff; font-size: 16px; }
+    .sb-brand .logo i { color: var(--ink); font-size: 16px; }
     .sb-brand .brand-text { flex: 1; min-width: 0; }
-    .sb-brand .brand-name { color: #fff; font-weight: 700; font-size: 13.5px; line-height: 1.2; }
-    .sb-brand .brand-sub { color: #6b7280; font-size: 10px; letter-spacing: .06em; }
+    .sb-brand .brand-name { color: #f7f3ea; font-family: "Fraunces", Georgia, serif; font-weight: 560; font-size: 18px; line-height: 1.05; }
+    .sb-brand .brand-sub { color: #8c8478; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin-top: 3px; }
 
     .env-badge {
       margin: 8px 14px 4px; padding: 3px 10px; border-radius: 4px; font-size: 10px; font-weight: 700;
@@ -59,8 +69,8 @@
       white-space: nowrap; overflow: hidden;
     }
     .sb-link:hover { background: #1a2030; color: #e5e7eb; }
-    .sb-link.active { background: #1e2d48; color: #93c5fd; }
-    .sb-link.active i { color: #3b82f6; }
+    .sb-link.active { background: #24211c; color: var(--accent); }
+    .sb-link.active i { color: var(--accent); }
     .sb-link i { font-size: 14px; width: 16px; flex-shrink: 0; opacity: .85; }
     .sb-link .badge-count {
       margin-left: auto; background: #1e3a5f; color: #93c5fd;
@@ -86,16 +96,16 @@
     .sb-footer {
       padding: 10px 14px; border-top: 1px solid #1e2530; color: #374151; font-size: 11px; margin-top: auto;
     }
-    .sb-footer .write-guard { color: #4ade80; font-weight: 600; font-size: 10px; }
+    .sb-footer .write-guard { color: var(--accent); font-weight: 600; font-size: 10px; letter-spacing: .08em; }
 
     /* ── Main ────────────────────────────────────────────────── */
     #main { margin-left: var(--sidebar-w); min-height: 100vh; display: flex; flex-direction: column; }
 
     /* Mode strip */
     .mode-strip {
-      background: #0f172a; color: #475569; font-size: 10px;
-      display: flex; align-items: center; gap: 0; padding: 0 20px; height: 28px;
-      border-bottom: 1px solid #1e293b; flex-shrink: 0; overflow-x: auto;
+      background: #1c1916; color: #8c8478; font-size: 10px; letter-spacing: .12em;
+      display: flex; align-items: center; gap: 0; padding: 0 20px; height: 32px;
+      border-bottom: 1px solid #2a2622; flex-shrink: 0; overflow-x: auto;
     }
     .mode-strip .ms-step {
       display: flex; align-items: center; gap: 4px; padding: 0 10px; white-space: nowrap;
@@ -103,13 +113,14 @@
     .mode-strip .ms-step + .ms-step::before {
       content: '→'; margin-right: 10px; color: #1e293b;
     }
-    .ms-on  { color: #4ade80; }
-    .ms-off { color: #dc2626; }
+    .ms-on  { color: var(--accent); }
+    .ms-off { color: #e07a5f; }
 
     /* Top bar */
     .topbar {
-      height: var(--header-h); background: #fff; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; padding: 0 20px; position: sticky; top: 0; z-index: 100;
+      height: var(--header-h); background: rgba(255,252,247,.86); backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 22px; position: sticky; top: 0; z-index: 100;
       flex-shrink: 0; gap: 12px;
     }
     .topbar-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -125,7 +136,7 @@
     .conn-disconnected { background: #f1f5f9; color: #64748b; }
 
     /* Cards */
-    .kpi-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+    .kpi-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; padding: 18px 20px; box-shadow: 0 12px 30px rgba(28,25,22,.04); }
     .kpi-card .kpi-value { font-size: 26px; font-weight: 700; line-height: 1; }
     .kpi-card .kpi-label { font-size: 11px; color: var(--muted); margin-top: 4px; letter-spacing: .04em; }
 
@@ -179,6 +190,33 @@
     .auto-2 { background:#fef9c3; color:#78350f; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
     .auto-3 { background:#fee2e2; color:#7f1d1d; padding:2px 7px; border-radius:12px; font-size:11px; font-weight:700; }
 
+    .hero-panel {
+      background: #1c1916;
+      color: #f7f3ea;
+      border-radius: 22px;
+      border: 1px solid #2c2824;
+      box-shadow: 0 20px 50px rgba(28,25,22,.12);
+    }
+    .hero-panel code { color: var(--accent); }
+    h1, h2, h3, h4, .display { font-family: "Fraunces", Georgia, serif; letter-spacing: -0.03em; }
+    .card { background: var(--card-bg); border-color: var(--border) !important; border-radius: 18px !important; }
+    .btn { border-radius: 999px; font-weight: 600; letter-spacing: -0.01em; }
+    .btn-primary, .btn-success {
+      background: var(--ink); border-color: var(--ink); color: var(--accent);
+    }
+    .btn-primary:hover, .btn-success:hover, .btn-primary:focus, .btn-success:focus {
+      background: #2a241c; border-color: #2a241c; color: #fff;
+    }
+    .btn-outline-primary, .btn-outline-secondary, .btn-outline-success {
+      border-color: #cfc6b8; color: var(--ink); background: transparent;
+    }
+    .btn-outline-primary:hover, .btn-outline-secondary:hover, .btn-outline-success:hover {
+      background: var(--ink); color: var(--accent); border-color: var(--ink);
+    }
+    .btn-warning { background: var(--accent); border-color: var(--accent); color: var(--ink); }
+    .table { --bs-table-bg: transparent; }
+    #main > .container, #main > .container-fluid, #main .page { }
+    .content-pad { padding: 22px 26px 40px; }
     {% block extra_css %}{% endblock %}
   </style>
 </head>
@@ -193,8 +231,8 @@
   <div class="sb-brand">
     <div class="logo"><i class="bi bi-robot"></i></div>
     <div class="brand-text">
-      <div class="brand-name">AI Bookkeeper</div>
-      <div class="brand-sub">POWERED BY CLAUDE · v2.0</div>
+      <div class="brand-name">Bookkeeper</div>
+      <div class="brand-sub">Profit Catalyst</div>
     </div>
   </div>
 
@@ -451,8 +489,9 @@
   </div>
   {% endif %}
 
-  <!-- Page content -->
+  <div class="content-pad">
   {% block content %}{% endblock %}
+  </div>
 
 </div>{# end #main #}
 
