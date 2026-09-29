@@ -31,13 +31,15 @@ from app.qbo_client import (
 )
 from app.accounting import (
     calculate_health_score, create_month_end_close, generate_audit_readiness,
-    get_portfolio_summary, run_accounting_assessment, update_close_step,
-    analyze_revenue, analyze_bank_reconciliation,
+    run_accounting_assessment, update_close_step,
+    analyze_revenue,
     _parse_balance_sheet, _parse_pl, _parse_ar_aging, _parse_ap_aging,
 )
+from app.bookkeeper.orchestrator import run_daily_bookkeeping
+from app.bookkeeper.write_guard import WriteRefused, issue_permit, unwrap_entity
 from app.bookkeeping import (
-    run_categorization, run_ar_matching, run_bank_reconciliation,
-    apply_categorization, apply_ar_match,
+    run_ar_matching, run_bank_reconciliation,
+    apply_ar_match,
     run_categorization_v2, execute_work_item,
 )
 from app.restaurant import (
@@ -1055,24 +1057,38 @@ def execute_journal_entry(
     }
 
     try:
-        result = client.create_journal_entry(db, qbo_payload)
-        qbo_txn = result.get("JournalEntry", {})
+        permit = issue_permit(
+            realm_id=realm_id,
+            record_realm_id=je.realm_id,
+            status=je.approval_status,
+            action_id=je.id,
+            endpoint="/journalentry",
+        )
+        result = client.create_journal_entry(db, qbo_payload, permit)
+        qbo_txn = unwrap_entity(result, "JournalEntry")
         je.qbo_transaction_id = qbo_txn.get("Id")
         je.qbo_transaction_number = qbo_txn.get("DocNumber")
         je.executed_at = _now()
         je.approval_status = "executed"
         je.execution_result = result
 
-        # Verify
+        confirmed = False
         if je.qbo_transaction_id:
             try:
-                verify = client.get_transaction(db, "journalentry", je.qbo_transaction_id)
-                if verify:
-                    je.verification_status = "verified"
-                    je.verified_at = _now()
-                    je.approval_status = "verified"
+                verify = unwrap_entity(
+                    client.get_transaction(db, "journalentry", je.qbo_transaction_id),
+                    "JournalEntry",
+                )
+                confirmed = str(verify.get("Id") or "") == str(je.qbo_transaction_id)
             except Exception:
-                je.verification_status = "unverified"
+                confirmed = False
+        if confirmed:
+            je.verification_status = "verified"
+            je.verified_at = _now()
+            je.approval_status = "verified"
+        else:
+            je.verification_status = "mismatch"
+            je.approval_status = "failed"
 
         log = ChangeLog(
             company_id=company.id,
@@ -1086,8 +1102,14 @@ def execute_journal_entry(
         )
         db.add(log)
         db.commit()
-        return JSONResponse({"success": True, "qbo_id": je.qbo_transaction_id, "status": je.approval_status})
+        return JSONResponse({
+            "success": je.approval_status == "verified",
+            "qbo_id": je.qbo_transaction_id,
+            "status": je.approval_status,
+        })
 
+    except WriteRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as e:
         je.execution_result = {"error": str(e)}
         db.commit()
@@ -1371,6 +1393,66 @@ def work_queue(realm_id: str, request: Request, db: Session = Depends(get_db)):
 
 
 # ════════════════════════════════════════════════════════════════
+# ─── DAILY BOOKKEEPING ──────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/company/{realm_id}/daily", response_class=HTMLResponse)
+def daily_bookkeeping_page(realm_id: str, request: Request, db: Session = Depends(get_db)):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    last = (
+        db.query(ChangeLog)
+        .filter(
+            ChangeLog.realm_id == realm_id,
+            ChangeLog.action_type == "DAILY_BOOKKEEPING",
+        )
+        .order_by(ChangeLog.created_at.desc())
+        .first()
+    )
+    return templates.TemplateResponse(request, "daily.html", {
+        "company": company,
+        "profile": profile,
+        "report": last.new_value if last else None,
+        "ran_at": last.created_at if last else None,
+    })
+
+
+@app.post("/company/{realm_id}/daily")
+def daily_bookkeeping_run(
+    realm_id: str,
+    modules: str = Form("all"),
+    lookback_days: int = Form(90),
+    db: Session = Depends(get_db),
+):
+    company = get_company_or_404(db, realm_id)
+    profile = get_profile(db, realm_id)
+    selected = None if modules in ("", "all") else [part.strip() for part in modules.split(",") if part.strip()]
+    try:
+        report = run_daily_bookkeeping(
+            db,
+            company,
+            profile,
+            lookback_days=lookback_days,
+            modules=selected,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.add(ChangeLog(
+        company_id=company.id,
+        realm_id=realm_id,
+        entity_type="ENGINE",
+        entity_id="daily_bookkeeping",
+        action_type="DAILY_BOOKKEEPING",
+        description=f"Daily bookkeeping {report.get('status')} for {company.company_name}",
+        new_value=report,
+        human_approval=False,
+        status="success" if report.get("status") in ("COMPLETED", "PARTIAL") else "error",
+    ))
+    db.commit()
+    return RedirectResponse(url=f"/company/{realm_id}/daily", status_code=302)
+
+
+# ════════════════════════════════════════════════════════════════
 # ─── BOOKKEEPING: CATEGORIZATION ────────────────────────────────
 # ════════════════════════════════════════════════════════════════
 
@@ -1389,7 +1471,7 @@ def bookkeeping_dashboard(realm_id: str, request: Request, db: Session = Depends
 
     pending = [wi for wi in work_items if wi.status == "pending"]
     approved = [wi for wi in work_items if wi.status == "approved"]
-    applied = [wi for wi in work_items if wi.status in ("applied", "executing")]
+    applied = [wi for wi in work_items if wi.status in ("applied", "executing", "verified")]
     rejected = [wi for wi in work_items if wi.status == "rejected"]
 
     # Map WorkItem fields to template-compatible names
@@ -1634,7 +1716,7 @@ def ar_matching_dashboard(realm_id: str, request: Request, db: Session = Depends
 
     pending = [m for m in matches if m.status == "pending"]
     approved = [m for m in matches if m.status == "approved"]
-    applied = [m for m in matches if m.status == "applied"]
+    applied = [m for m in matches if m.status in ("applied", "verified")]
     rejected = [m for m in matches if m.status == "rejected"]
 
     return templates.TemplateResponse(request, "ar_matching.html", {
@@ -1710,7 +1792,7 @@ def apply_ar_match_route(realm_id: str, match_id: int, db: Session = Depends(get
     result = apply_ar_match(db, company, match)
     if result.get("success"):
         db.commit()
-        return JSONResponse({"ok": True, "status": "applied"})
+        return JSONResponse({"ok": True, "status": "verified"})
     else:
         raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
 

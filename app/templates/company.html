@@ -3,14 +3,14 @@
 
 {% block content %}
 <!-- COMPANY CONTEXT HEADER -->
-<div class="card border-0 mb-4" style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:12px;">
+<div class="card border-0 mb-4 hero-panel">
   <div class="card-body p-4 text-white">
     <div class="row align-items-center">
       <div class="col">
         <div class="text-uppercase small mb-1" style="color:#94a3b8;letter-spacing:.08em;">CURRENT COMPANY WORKSPACE</div>
         <h4 class="mb-1 fw-bold">{{ company.company_name }}</h4>
         <div class="d-flex flex-wrap gap-3 mt-2 small" style="color:#94a3b8;">
-          <span><i class="bi bi-key me-1"></i>Realm ID: <code style="color:#60a5fa;">{{ company.realm_id }}</code></span>
+          <span><i class="bi bi-key me-1"></i>Realm ID: <code>{{ company.realm_id }}</code></span>
           <span><i class="bi bi-link-45deg me-1"></i>
             {% if company.connection_status == 'connected' %}<span class="text-success">● Connected</span>{% else %}<span class="text-muted">● Disconnected</span>{% endif %}
           </span>
@@ -55,12 +55,17 @@
 {% else %}
 <div class="sync-bar mb-4 d-flex align-items-center justify-content-between">
   <div>
-    <i class="bi bi-check-circle-fill me-2"></i>
-    <strong>QBO DATA CURRENT</strong> · Last Sync: {{ company.last_sync | fmt_date }}
+    <i class="bi bi-archive me-2"></i>
+    <strong>CACHED SNAPSHOT</strong> · not a live QBO read
+    · Last Sync: {{ company.last_sync | fmt_date }}
     · Status: <strong>{{ company.last_sync_status | title }}</strong>
     · Data as of: {{ profile.data_as_of | fmt_date }}
   </div>
   <div class="d-flex gap-2">
+    <form method="post" action="/company/{{ company.realm_id }}/daily" class="d-inline">
+      <input type="hidden" name="modules" value="all">
+      <button class="btn btn-sm btn-success fw-semibold"><i class="bi bi-play-circle me-1"></i>Work this company</button>
+    </form>
     <form method="post" action="/company/{{ company.realm_id }}/assess" class="d-inline">
       <button class="btn btn-sm btn-outline-success fw-semibold"><i class="bi bi-clipboard2-check me-1"></i>Run Assessment</button>
     </form>

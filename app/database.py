@@ -626,8 +626,9 @@ class CompanyRule(Base):
       SKIP       — match pattern → suppress proposal (txn already handled)
       FLAG       — match pattern → force autonomy_level=HUMAN_REQUIRED
 
-    Rules are checked in priority order (desc) before global library rules.
-    Only active/approved rules are evaluated by the engine.
+    Rules are checked in priority order (desc).
+    Only active, approved rules for this realm are evaluated.
+    There is no shared vendor map across companies.
     """
     __tablename__ = "company_rules"
 

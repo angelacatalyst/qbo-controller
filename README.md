@@ -4,7 +4,9 @@ A multi-company, controller-grade accounting intelligence platform that connects
 
 ## What It Does
 
-- **Real-time QBO data sync** — pulls live data from QuickBooks Online via OAuth 2.0
+- **AI bookkeeper for every company** — one agent, company-specific rules and history. No shared vendor-to-account map.
+- **Daily cycle** — connect, sync when the snapshot is stale, inspect, detect, propose. Approval comes before any QBO write.
+- **Real-time QBO reads where the API allows them** — transactions, bills, invoices, and payments are live. Financial statements and the health score use the last sync and are labeled as a cached snapshot.
 - **Accounting health score** — 0–100 weighted score across 10 accounting categories
 - **Automated issue detection** — identifies uncategorized transactions, undeposited funds, opening balance equity, AR/AP aging problems, and more
 - **Journal entry approval workflow** — propose → approve → execute in QBO → verify → document
@@ -132,6 +134,7 @@ qbo_controller/
     ├── database.py        # SQLAlchemy models + SQLite
     ├── security.py        # Fernet token encryption
     ├── qbo_client.py      # QBO API v3 client + OAuth
+    ├── bookkeeper/        # Daily cycle, write guard, company history, reviews
     ├── accounting.py      # Accounting analysis engine
     ├── static/            # CSS, JS, images
     └── templates/
@@ -162,7 +165,9 @@ OAuth tokens are encrypted with Fernet symmetric encryption before storage. Toke
 READ-ONLY → DETECT → ANALYZE → RECOMMEND → REVIEW → APPROVE → EXECUTE → VERIFY → DOCUMENT
 ```
 
-Journal entries follow this exact pipeline. "Execute" calls the QBO API and creates the entry. All steps are logged in the immutable change log.
+Journal entries, categorizations, and payment applications follow this pipeline. Execute calls the QBO API only with a write-guard permit for that company, then re-reads the object. A change is verified only when the re-read matches. Payroll provider totals and bank-statement reconciliations are not on the Accounting API; those reviews are marked HUMAN_REQUIRED instead of being invented.
+
+Open a company and choose **Work this company**. That runs the daily bookkeeping cycle for that realm only.
 
 ---
 
