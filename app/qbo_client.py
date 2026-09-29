@@ -12,6 +12,8 @@ from typing import Any, Optional
 import requests
 from sqlalchemy.orm import Session
 
+from app.bookkeeper.pagination import walk_pages
+from app.bookkeeper.write_guard import WritePermit, WriteRefused, normalize_endpoint
 from app.config import settings
 from app.database import Company, SyncHistory, _now
 from app.security import decrypt_token, encrypt_token
@@ -157,6 +159,10 @@ def classify_qbo_error(exc: Exception, entity: str = "") -> tuple[str, str]:
         (error_class, detail_message)
     """
     try:
+        if isinstance(exc, requests.exceptions.Timeout):
+            return "timeout", f"Timeout calling {entity or 'QBO'}."
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return "network_error", f"Network error calling {entity or 'QBO'}: {exc}"
         if not isinstance(exc, requests.exceptions.HTTPError):
             return "api_error", str(exc)
 
@@ -220,6 +226,15 @@ def classify_qbo_error(exc: Exception, entity: str = "") -> tuple[str, str]:
                     f"{entity}: query validation error "
                     f"(Intuit error {code}: {err.get('Message', '')} — {err.get('Detail', '')})"
                 )
+            if code == "5010":
+                return "stale_object", (
+                    f"{entity}: SyncToken is stale (Intuit error 5010). Re-read the object and retry the write."
+                )
+            if code == "6000":
+                return "validation_error", (
+                    f"{entity}: QBO rejected the business validation "
+                    f"(Intuit error 6000: {err.get('Message', '')} — {err.get('Detail', '')})"
+                )
 
             # ── Explicit "not supported / not available" language ─────────
             _unsupported_phrases = (
@@ -228,7 +243,6 @@ def classify_qbo_error(exc: Exception, entity: str = "") -> tuple[str, str]:
                 "invalid entity",
                 "is not an available",
                 "entity type not supported",
-                "object not found",
                 "unsupported entity",
             )
             if any(ph in detail for ph in _unsupported_phrases):
@@ -306,23 +320,38 @@ class QBOClient:
         return decrypt_token(company.access_token_enc)
 
     def _get(self, db: Session, endpoint: str, params: dict = None) -> dict:
-        """GET request to QBO API."""
+        """GET request to QBO API. Retries timeout, network, 429, and 5xx."""
         token = self._get_token(db)
-        resp = self._session.get(
-            f"{self.company_url}{endpoint}",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params or {},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = self._session.get(
+                    f"{self.company_url}{endpoint}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params or {},
+                    timeout=30,
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last_error = requests.exceptions.HTTPError(response=resp)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise requests.exceptions.HTTPError("QBO GET failed")
 
-    def _post(self, db: Session, endpoint: str, payload: dict) -> dict:
-        """POST request to QBO API."""
+    def _post(self, db: Session, endpoint: str, payload: dict, permit: WritePermit = None) -> dict:
+        """POST to QBO. Refuses the call unless a write-guard permit matches this company."""
+        path = normalize_endpoint(endpoint)
+        if permit is None or permit.realm_id != self.realm_id or permit.endpoint != path:
+            raise WriteRefused("QBO write refused: a matching write-guard permit is required.")
         token = self._get_token(db)
         resp = self._session.post(
-            f"{self.company_url}{endpoint}",
+            f"{self.company_url}{path}",
             headers={"Authorization": f"Bearer {token}"},
+            params={"minorversion": "65"},
             json=payload,
             timeout=30,
         )
@@ -364,25 +393,11 @@ class QBOClient:
         clean = _re.sub(r'\s+STARTPOSITION\s+\d+', '', sql_base, flags=_re.IGNORECASE)
         clean = _re.sub(r'\s+MAXRESULTS\s+\d+', '', clean, flags=_re.IGNORECASE).strip()
 
-        all_records: list = []
-        start = 1
-        is_complete = False
+        def fetch_page(start: int, size: int) -> list:
+            sql = f"{clean} STARTPOSITION {start} MAXRESULTS {size}"
+            return self._query(db, sql)
 
-        while True:
-            sql = f"{clean} STARTPOSITION {start} MAXRESULTS {page_size}"
-            page = self._query(db, sql)
-            if not page:
-                is_complete = True
-                break
-            all_records.extend(page)
-            if len(page) < page_size:
-                # Last page — we have everything
-                is_complete = True
-                break
-            start += page_size
-            # Safety: if QBO somehow returns 0 next page this loop exits above
-
-        return all_records, is_complete, len(all_records)
+        return walk_pages(fetch_page, page_size)
 
     def _report(self, db: Session, report_name: str, params: dict = None) -> dict:
         """Fetch a QBO financial report."""
@@ -404,7 +419,8 @@ class QBOClient:
     # ── Chart of Accounts ─────────────────────────────────────
 
     def get_accounts(self, db: Session) -> list:
-        return self._query(db, "SELECT * FROM Account MAXRESULTS 1000")
+        rows, _complete, _total = self._query_all(db, "SELECT * FROM Account")
+        return rows
 
     def get_accounts_by_type(self, db: Session, account_type: str) -> list:
         return self._query(db, f"SELECT * FROM Account WHERE AccountType='{account_type}' MAXRESULTS 500")
@@ -619,9 +635,9 @@ class QBOClient:
 
     # ── Write Operations (require approval) ───────────────────
 
-    def create_journal_entry(self, db: Session, je_data: dict) -> dict:
-        """Create a journal entry in QBO. Requires prior approval."""
-        return self._post(db, "/journalentry", je_data)
+    def create_journal_entry(self, db: Session, je_data: dict, permit: WritePermit) -> dict:
+        """Create a journal entry in QBO. The caller must hold an approved write permit."""
+        return self._post(db, "/journalentry", je_data, permit=permit)
 
     def get_transaction(self, db: Session, txn_type: str, txn_id: str) -> dict:
         """Fetch a specific transaction to verify it was created."""

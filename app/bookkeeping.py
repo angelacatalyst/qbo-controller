@@ -23,271 +23,23 @@ import logging
 
 from app.database import (
     Company, CompanyProfile,
-    ProposedCategorization, ProposedARMatch,
-    ProposedJournalEntry, ChangeLog, WorkItem, CompanyRule, _now,
+    ProposedARMatch, ChangeLog, WorkItem, CompanyRule, _now,
 )
 
 logger = logging.getLogger(__name__)
+from app.bookkeeper.history import build_payee_history, suggest_from_history
+from app.bookkeeper.tools import QboTools
+from app.bookkeeper.write_guard import (
+    WriteRefused,
+    account_is_set,
+    issue_permit,
+    patch_first_account,
+    post_endpoint_for,
+    sparse_body,
+    unwrap_entity,
+    verified_status,
+)
 from app.qbo_client import QBOClient, classify_qbo_error
-
-
-# ═══════════════════════════════════════════════════════════════
-# SECTION 1 — TRANSACTION CATEGORIZATION ENGINE
-# ═══════════════════════════════════════════════════════════════
-
-# ── Category Rule Library ────────────────────────────────────
-# Each rule: (pattern_in_payee_or_memo, account_keywords, confidence)
-# Pattern is matched case-insensitively against payee name + memo.
-# account_keywords is matched against COA account names.
-
-_CATEGORIZATION_RULES: list[tuple[str, str, str]] = [
-    # Banking / Financial
-    (r"bank fee|service charge|monthly fee|wire fee|overdraft",      "bank charges|bank fees|service charge",    "high"),
-    (r"interest (charge|expense|payment)",                            "interest expense",                         "high"),
-    # Payroll
-    (r"gusto|adp|paychex|rippling|bamboohr|payroll|paylocity",       "payroll expense|wages|salaries",           "high"),
-    # Insurance
-    (r"insurance|allstate|state farm|progressive|geico|travelers|hiscox|next insurance", "insurance expense",    "high"),
-    # Utilities
-    (r"electric|gas|water|utility|pg&e|con ed|xcel|centerpoint|atmos", "utilities|electric|gas",                "high"),
-    (r"internet|comcast|att|verizon|spectrum|at&t|tmobile|t-mobile",  "internet|telephone|utilities|communication", "high"),
-    # Office / Supplies
-    (r"amazon|staples|office depot|officemax|costco|sams club|sam's", "office supplies|supplies",                "medium"),
-    (r"usps|fedex|ups|dhl|stamps\.com",                               "postage|shipping",                        "high"),
-    # Software / Subscriptions
-    (r"quickbooks|intuit",                                            "accounting|software subscription",         "high"),
-    (r"google|microsoft|adobe|dropbox|zoom|slack|hubspot|salesforce|notion|asana|monday\.com",
-                                                                      "software|subscription|cloud services|saas", "high"),
-    (r"netflix|spotify|hulu|apple\.com/bill",                         "entertainment|subscriptions",              "medium"),
-    # Advertising
-    (r"google ads|facebook|meta |instagram|linkedin|twitter|tiktok|yelp|bing ads",
-                                                                      "advertising|marketing",                    "high"),
-    # Travel / Auto
-    (r"uber|lyft|airbnb|hotel|marriott|hilton|hyatt|delta|american airlines|southwest|jetblue|hertz|enterprise|avis",
-                                                                      "travel|airfare|hotel|auto",                "medium"),
-    (r"chevron|shell|exxon|bp |marathon|speedway|quiktrip|wawa|gasoline|fuel",
-                                                                      "auto|fuel|gas",                            "high"),
-    # Meals
-    (r"doordash|grubhub|uber eats|postmates|seamless",                "meals|food delivery",                     "medium"),
-    # Professional services
-    (r"attorney|lawyer|law firm|legal",                               "legal|professional services",              "high"),
-    (r"cpa|accountant|bookkeeper|accounting firm",                    "accounting|professional services",         "high"),
-    (r"consultant|consulting",                                        "consulting|professional services",         "medium"),
-    # Rent
-    (r"rent|lease|landlord|property management",                      "rent|lease expense",                       "high"),
-    # Cleaning / Maintenance
-    (r"cleaning|janitorial|maintenance|repair",                       "repairs|maintenance|cleaning",             "medium"),
-    # Restaurant-specific COGS
-    (r"sysco|us foods|performance food|restaurant depot|gordon food|gfs|cheney brothers|chef'?s warehouse",
-                                                                      "food cost|cost of goods|food purchases",   "high"),
-    (r"beverage|liquor|wine|beer|spirits|southern wine|breakthru|glazer",
-                                                                      "beverage cost|liquor|cost of goods",       "high"),
-    # Taxes & Licenses
-    (r"irs|internal revenue|state tax|city tax|county tax|sales tax payment|tax payment",
-                                                                      "income tax|sales tax payable|taxes",       "high"),
-    (r"license|permit|registration|secretary of state",               "licenses|permits",                        "high"),
-]
-
-
-def _match_rule(payee: str, memo: str) -> tuple[str | None, str, str]:
-    """Return (account_keyword, confidence, rule_text) for the first matching rule, or (None, '', '')."""
-    combined = f"{payee} {memo}".lower()
-    for pat, acct_kw, conf in _CATEGORIZATION_RULES:
-        if re.search(pat, combined, re.IGNORECASE):
-            return acct_kw, conf, pat
-    return None, "", ""
-
-
-def _find_coa_account(coa: list, keywords: str) -> tuple[str | None, str | None, str | None]:
-    """Match COA account by keyword, return (id, name, type) or (None, None, None)."""
-    kws = [k.strip().lower() for k in keywords.split("|")]
-    for kw in kws:
-        for a in coa:
-            if kw in a.get("name", "").lower():
-                return a.get("id"), a.get("name"), a.get("type")
-    return None, None, None
-
-
-def _is_uncategorized(account_name: str) -> bool:
-    """Return True if this account is a placeholder that needs categorization."""
-    n = (account_name or "").lower()
-    return any(kw in n for kw in [
-        "uncategorized", "ask my accountant", "miscellaneous",
-        "other expense", "other income",
-    ])
-
-
-def run_categorization(
-    db: Session,
-    company: Company,
-    profile: CompanyProfile,
-    lookback_days: int = 90,
-) -> list[ProposedCategorization]:
-    """
-    Fetch uncategorized / Ask My Accountant transactions from QBO for the
-    past `lookback_days`, apply rules, and create ProposedCategorization
-    records for review.
-
-    Returns the list of newly created proposals (does NOT commit — caller
-    must commit after reviewing or the route handler will commit).
-    """
-    if not profile or not profile.data_as_of:
-        return []
-
-    coa = profile.chart_of_accounts or []
-    conventions: dict = profile.accounting_conventions or {}
-
-    client = QBOClient(company)
-    start_date = (date.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-
-    # IDs already proposed (avoid duplicates)
-    existing_txn_ids = {
-        r.qbo_txn_id
-        for r in db.query(ProposedCategorization.qbo_txn_id)
-                   .filter_by(realm_id=company.realm_id)
-                   .filter(ProposedCategorization.status.in_(["pending", "approved"]))
-                   .all()
-    }
-
-    proposals: list[ProposedCategorization] = []
-    base_count = db.query(ProposedCategorization).filter_by(realm_id=company.realm_id).count()
-
-    def _new_proposal(**kwargs) -> ProposedCategorization:
-        p = ProposedCategorization(
-            company_id=company.id,
-            realm_id=company.realm_id,
-            **kwargs,
-        )
-        db.add(p)
-        proposals.append(p)
-        return p
-
-    # ── Pull Purchases / Expenses ──────────────────────────────
-    try:
-        purchases = client.get_expenses(db, start_date=start_date)
-    except Exception:
-        purchases = []
-
-    for txn in purchases:
-        txn_id = txn.get("Id", "")
-        if txn_id in existing_txn_ids:
-            continue
-
-        lines = txn.get("Line", [])
-        for line in lines:
-            line_acct = (line.get("AccountBasedExpenseLineDetail", {})
-                            .get("AccountRef", {})
-                            .get("name", ""))
-            if not _is_uncategorized(line_acct):
-                continue
-
-            payee = (txn.get("EntityRef", {}).get("name", "")
-                     or txn.get("PaymentType", ""))
-            memo = txn.get("PrivateNote", "") or line.get("Description", "")
-            amount = float(line.get("Amount", 0))
-            txn_date_str = txn.get("TxnDate", "")
-
-            acct_kw, conf, rule = _match_rule(payee, memo)
-
-            # Check company-specific conventions first
-            payee_lower = payee.lower()
-            for conv_key, conv_acct in conventions.items():
-                if conv_key.lower() in payee_lower:
-                    acct_kw = conv_acct.lower()
-                    conf = "high"
-                    rule = f"company_convention:{conv_key}"
-                    break
-
-            if acct_kw:
-                acct_id, acct_name, acct_type = _find_coa_account(coa, acct_kw)
-            else:
-                acct_id, acct_name, acct_type = None, None, None
-                conf = "low"
-                rule = "no_match"
-
-            _new_proposal(
-                qbo_txn_id=txn_id,
-                qbo_txn_type="Purchase",
-                txn_date=datetime.strptime(txn_date_str, "%Y-%m-%d") if txn_date_str else None,
-                amount=amount,
-                payee_name=payee,
-                memo=memo[:500] if memo else "",
-                current_account_id=line.get("AccountBasedExpenseLineDetail", {})
-                                       .get("AccountRef", {}).get("value"),
-                current_account_name=line_acct,
-                suggested_account_id=acct_id,
-                suggested_account_name=acct_name,
-                suggested_account_type=acct_type,
-                confidence=conf,
-                reason=_build_reason(acct_kw, rule, payee, memo),
-                rule_matched=rule,
-            )
-        existing_txn_ids.add(txn_id)
-
-    # ── Pull Deposits with uncategorized lines ─────────────────
-    try:
-        deposits = client.get_deposits(db, start_date=start_date)
-    except Exception:
-        deposits = []
-
-    for txn in deposits:
-        txn_id = txn.get("Id", "")
-        if txn_id in existing_txn_ids:
-            continue
-
-        for line in txn.get("Line", []):
-            line_acct = (line.get("DepositLineDetail", {})
-                            .get("AccountRef", {})
-                            .get("name", ""))
-            if not _is_uncategorized(line_acct):
-                continue
-
-            memo = line.get("Description", "")
-            amount = float(line.get("Amount", 0))
-
-            acct_kw, conf, rule = _match_rule("", memo)
-            if acct_kw:
-                acct_id, acct_name, acct_type = _find_coa_account(coa, acct_kw)
-            else:
-                acct_id = acct_name = acct_type = None
-                conf = "low"
-                rule = "no_match"
-
-            _new_proposal(
-                qbo_txn_id=txn_id,
-                qbo_txn_type="Deposit",
-                txn_date=datetime.strptime(txn.get("TxnDate", ""), "%Y-%m-%d")
-                         if txn.get("TxnDate") else None,
-                amount=amount,
-                payee_name="",
-                memo=memo[:500],
-                current_account_name=line_acct,
-                suggested_account_id=acct_id,
-                suggested_account_name=acct_name,
-                suggested_account_type=acct_type,
-                confidence=conf,
-                reason=_build_reason(acct_kw, rule, "", memo),
-                rule_matched=rule,
-            )
-        existing_txn_ids.add(txn_id)
-
-    return proposals
-
-
-def _build_reason(acct_kw: str | None, rule: str, payee: str, memo: str) -> str:
-    if rule == "no_match":
-        return (
-            f"No automatic category match found for payee '{payee}' / memo '{memo}'. "
-            "Please select the correct expense account manually."
-        )
-    if rule.startswith("company_convention:"):
-        convention = rule.split(":", 1)[1]
-        return f"Company convention: '{convention}' → mapped to '{acct_kw}'."
-    return (
-        f"Payee/memo matched rule pattern '{rule}'. "
-        f"Suggested account: '{acct_kw}'. "
-        "Verify this matches the actual nature of the expense."
-    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -489,15 +241,14 @@ def _load_company_rules(db: Session, realm_id: str) -> list:
     Ordered by priority DESC so higher-priority rules are evaluated first.
     """
     try:
-        from app.database import CompanyRule as _CompanyRule  # local import avoids circular
         rules = (
-            db.query(_CompanyRule)
+            db.query(CompanyRule)
             .filter(
-                _CompanyRule.realm_id == realm_id,
-                _CompanyRule.status == "active",
-                _CompanyRule.approved_by.isnot(None),
+                CompanyRule.realm_id == realm_id,
+                CompanyRule.status == "active",
+                CompanyRule.approved_by.isnot(None),
             )
-            .order_by(_CompanyRule.priority.desc())
+            .order_by(CompanyRule.priority.desc())
             .all()
         )
         return rules
@@ -515,8 +266,6 @@ def _apply_company_rules(rules: list, payee: str, memo: str, amount: float):
         MEMO_ONLY      — regex search in memo only
         AMOUNT_RANGE   — pattern is 'min:max' in absolute amount
     """
-    import re as _re
-
     payee_str = (payee or "").strip()
     memo_str = (memo or "").strip()
     abs_amount = abs(amount or 0.0)
@@ -524,7 +273,7 @@ def _apply_company_rules(rules: list, payee: str, memo: str, amount: float):
     for rule in rules:
         pattern = rule.pattern or ""
         flags_str = (rule.pattern_flags or "case_insensitive").lower()
-        re_flags = _re.IGNORECASE if "case_insensitive" in flags_str else 0
+        re_flags = re.IGNORECASE if "case_insensitive" in flags_str else 0
         ctype = (rule.condition_type or "PAYEE_OR_MEMO").upper()
 
         try:
@@ -536,14 +285,14 @@ def _apply_company_rules(rules: list, payee: str, memo: str, amount: float):
                 if lo <= abs_amount <= hi:
                     return rule
             elif ctype == "PAYEE_ONLY":
-                if payee_str and _re.search(pattern, payee_str, re_flags):
+                if payee_str and re.search(pattern, payee_str, re_flags):
                     return rule
             elif ctype == "MEMO_ONLY":
-                if memo_str and _re.search(pattern, memo_str, re_flags):
+                if memo_str and re.search(pattern, memo_str, re_flags):
                     return rule
             else:  # PAYEE_OR_MEMO (default)
                 combined = f"{payee_str} {memo_str}".strip()
-                if combined and _re.search(pattern, combined, re_flags):
+                if combined and re.search(pattern, combined, re_flags):
                     return rule
         except Exception as exc:
             logger.warning("Rule %s pattern error: %s", rule.id, exc)
@@ -783,15 +532,19 @@ def run_categorization_v2(
         .filter(
             WorkItem.realm_id == realm_id,
             WorkItem.work_type == "CATEGORIZE",
-            WorkItem.status.notin_(["rejected", "applied"]),
+            WorkItem.status.notin_(["rejected", "applied", "verified"]),
         )
         .all()
         if row[0]
     )
 
     # ── 4. Process each transaction ─────────────────────────────────────────
-    accounts = _get_chart_of_accounts(db, client)   # cached fetch
+    accounts = _get_chart_of_accounts(db, client)
     new_work_items: list[WorkItem] = []
+    payee_history = build_payee_history(
+        raw_txns,
+        lambda name: _is_uncategorized_v2(name, ""),
+    )
 
     # ── 4-pre. Build duplicate/transfer detection structures (one pass, no extra API calls) ──
     seen_txn_signatures: dict[str, int] = {}
@@ -945,20 +698,19 @@ def run_categorization_v2(
                 confidence = matched_rule.confidence_strength or "high"
                 reason = f"Company rule '{matched_rule.rule_name}' matched → {proposed_account_name}."
         else:
-            # No matching company rule — use global keyword library for UNCATEGORIZED/GENERIC
             if review_type in ("UNCATEGORIZED", "GENERIC_CATEGORY"):
-                acct_kw, _, rule_label = _match_rule(payee_name, memo)
-                if acct_kw and rule_label != "no_match":
-                    # _find_coa_account expects the profile COA (lowercase keys: "id","name","type")
-                    _coa_id, _coa_name, _ = _find_coa_account(
-                        profile.chart_of_accounts or [], acct_kw
-                    )
-                    proposed_account_id = _coa_id
-                    proposed_account_name = _coa_name or acct_kw
-                    confidence = "medium"
-                    reason = _build_reason(acct_kw, rule_label, payee_name, memo)
+                suggestion = suggest_from_history(payee_history, payee_name)
+                if suggestion:
+                    proposed_account_id = suggestion.account_id
+                    proposed_account_name = suggestion.account_name
+                    confidence = suggestion.confidence
+                    reason = suggestion.reason
+                    rule_type = "CLIENT_RULE"
                 else:
-                    reason = _build_reason(None, "no_match", payee_name, memo)
+                    reason = (
+                        "No approved company rule and no repeated account for this payee "
+                        "in this company's own history. Select the account for this company."
+                    )
             elif review_type == "POSSIBLE_DUPLICATE":
                 rule_type = "FLAG"
                 confidence = "low"
@@ -976,7 +728,10 @@ def run_categorization_v2(
                     "accounts that should be excluded from P&L."
                 )
             else:
-                reason = _build_reason(None, "no_match", payee_name, memo)
+                reason = (
+                    "No approved company rule for this payee in this company. "
+                    "Review the account before changing QBO."
+                )
 
         # ── 4f. Assess risk and autonomy ─────────────────────────────────────
         risk = _assess_risk(amount, materiality_limit)
@@ -1007,7 +762,10 @@ def run_categorization_v2(
             confidence=confidence,
             risk=risk,
             autonomy_level=autonomy_level,
-            rule_matched=matched_rule.rule_name if matched_rule else None,
+            rule_matched=(
+                matched_rule.rule_name if matched_rule
+                else ("company-history" if proposed_account_id else None)
+            ),
             reason=reason,
             status="pending",
         )
@@ -1183,39 +941,10 @@ def execute_work_item(db: Session, company, work_item: WorkItem) -> dict:
         db.flush()
         return {"success": False, "message": "QBO returned empty transaction", "qbo_response": None}
 
-    # ── Step 3: Patch the account reference on the first matching line ───────
-    detail_key = _txn_type_detail_key(work_item.qbo_txn_type)
-    lines = fresh_txn.get(detail_key) or []
-    if isinstance(lines, dict):
-        lines = [lines]
-
-    patched = False
-    for line in lines:
-        for detail_field in (
-            "AccountBasedExpenseLineDetail",
-            "SalesItemLineDetail",
-            "DepositLineDetail",
-        ):
-            if detail_field in line:
-                line[detail_field]["AccountRef"] = {
-                    "value": work_item.proposed_account_id,
-                    "name": work_item.proposed_account_name or "",
-                }
-                patched = True
-                break
-        # Flat AccountRef (Deposit top-level)
-        if not patched and "AccountRef" in line:
-            line["AccountRef"] = {
-                "value": work_item.proposed_account_id,
-                "name": work_item.proposed_account_name or "",
-            }
-            patched = True
-        if patched:
-            break
-
-    if not patched:
+    entity = unwrap_entity(fresh_txn, work_item.qbo_txn_type)
+    if not patch_first_account(entity, work_item.proposed_account_id, work_item.proposed_account_name or ""):
         work_item.status = "approved"
-        work_item.error_message = "Could not locate line to patch account reference"
+        work_item.error_message = "Could not locate an AccountRef line to update"
         db.flush()
         return {
             "success": False,
@@ -1223,61 +952,74 @@ def execute_work_item(db: Session, company, work_item: WorkItem) -> dict:
             "qbo_response": None,
         }
 
-    # ── Step 4: Write to QBO ─────────────────────────────────────────────────
-    txn_type_lower = work_item.qbo_txn_type.lower()
     try:
-        qbo_response = client._post(db, f"/{txn_type_lower}", fresh_txn)
-    except Exception as exc:
-        logger.error("[execute:%s] QBO write error: %s", work_item.id, exc)
+        endpoint = post_endpoint_for(work_item.qbo_txn_type, entity)
+        permit = issue_permit(
+            realm_id=realm_id,
+            record_realm_id=work_item.realm_id,
+            status="approved",
+            action_id=work_item.id,
+            endpoint=endpoint,
+        )
+        qbo_response = QboTools(company).post_update(db, permit, endpoint, sparse_body(entity))
+    except WriteRefused as exc:
         work_item.status = "approved"
-        work_item.error_message = f"QBO write failed: {exc}"
+        work_item.error_message = str(exc)
         db.flush()
-        return {"success": False, "message": f"QBO write failed: {exc}", "qbo_response": None}
+        return {"success": False, "message": str(exc), "qbo_response": None}
+    except Exception as exc:
+        kind, detail = classify_qbo_error(exc, entity=work_item.qbo_txn_type)
+        logger.error("[execute:%s] QBO write error (%s): %s", work_item.id, kind, detail)
+        # Timeout may have landed. A rejected validation did not.
+        work_item.status = "failed" if kind in ("timeout", "network_error") else "approved"
+        work_item.error_message = detail
+        db.flush()
+        return {"success": False, "message": detail, "qbo_response": None}
 
-    # ── Step 5: Verify the write ─────────────────────────────────────────────
-    verification_status = "unverified"
+    read_type = "Purchase" if endpoint == "/purchase" else work_item.qbo_txn_type
+    confirmed = False
     try:
-        verified_txn = client.get_transaction(db, work_item.qbo_txn_type, work_item.qbo_txn_id)
-        v_lines = verified_txn.get(detail_key) or []
-        if isinstance(v_lines, dict):
-            v_lines = [v_lines]
-        for vl in v_lines:
-            for dfield in ("AccountBasedExpenseLineDetail", "SalesItemLineDetail", "DepositLineDetail"):
-                if dfield in vl:
-                    written_id = vl[dfield].get("AccountRef", {}).get("value")
-                    if str(written_id) == str(work_item.proposed_account_id):
-                        verification_status = "verified"
-                    else:
-                        verification_status = "mismatch"
-                    break
-            if verification_status != "unverified":
-                break
+        verified_raw = client.get_transaction(db, read_type, work_item.qbo_txn_id)
+        confirmed = account_is_set(unwrap_entity(verified_raw, read_type), work_item.proposed_account_id)
     except Exception as exc:
         logger.warning("[execute:%s] Verification read error: %s", work_item.id, exc)
-        verification_status = "verify_error"
+        confirmed = False
 
-    # ── Step 6: Update WorkItem ──────────────────────────────────────────────
-    work_item.status = "applied"
+    outcome = verified_status(confirmed)
+    work_item.status = outcome
     work_item.executed_at = _now()
     work_item.execution_result = qbo_response
     work_item.qbo_update_response = qbo_response
-    work_item.verification_status = verification_status
+    work_item.verification_status = "verified" if confirmed else "mismatch"
     work_item.verified_at = _now()
     work_item.updated_at = _now()
+    if not confirmed:
+        work_item.error_message = "QBO accepted a write but the re-read did not show the proposed account."
 
-    # ── Step 7: Audit log ────────────────────────────────────────────────────
     try:
-        cl = ChangeLog(
+        db.add(ChangeLog(
             company_id=company.id,
             realm_id=realm_id,
             entity_type=work_item.qbo_txn_type,
             entity_id=work_item.qbo_txn_id,
             action_type="CATEGORIZE",
-            description=f"WorkItem {work_item.id}: {work_item.current_account_name} → {work_item.proposed_account_name}",
+            description=(
+                f"WorkItem {work_item.id}: {work_item.current_account_name} → "
+                f"{work_item.proposed_account_name} ({outcome})"
+            ),
             original_value={"account_id": work_item.current_account_id, "account_name": work_item.current_account_name},
-            new_value={"account_id": work_item.proposed_account_id, "account_name": work_item.proposed_account_name},
-        )
-        db.add(cl)
+            new_value={
+                "account_id": work_item.proposed_account_id,
+                "account_name": work_item.proposed_account_name,
+                "endpoint": endpoint,
+            },
+            approved_by=work_item.approved_by,
+            human_approval=True,
+            api_response=qbo_response,
+            verification_status=work_item.verification_status,
+            verified_at=work_item.verified_at,
+            status="success" if confirmed else "error",
+        ))
     except Exception as exc:
         logger.warning("[execute:%s] ChangeLog write error: %s", work_item.id, exc)
 
@@ -1288,14 +1030,15 @@ def execute_work_item(db: Session, company, work_item: WorkItem) -> dict:
         db.rollback()
         return {"success": False, "message": f"DB error after QBO write: {exc}", "qbo_response": qbo_response}
 
-    logger.info(
-        "[execute:%s] Applied. account=%s verification=%s",
-        work_item.id, work_item.proposed_account_name, verification_status,
-    )
     return {
-        "success": True,
-        "message": f"Applied. Account set to '{work_item.proposed_account_name}'. Verification: {verification_status}.",
+        "success": confirmed,
+        "message": (
+            f"Verified. Account is '{work_item.proposed_account_name}'."
+            if confirmed else
+            "Write was sent but verification did not confirm the account. Status is failed."
+        ),
         "qbo_response": qbo_response,
+        "status": outcome,
     }
 
 
@@ -1657,77 +1400,6 @@ def _safe_float(v) -> float:
 # SECTION 4 — APPLY APPROVED CATEGORIZATIONS
 # ═══════════════════════════════════════════════════════════════
 
-def apply_categorization(
-    db: Session,
-    company: Company,
-    proposal: ProposedCategorization,
-) -> dict:
-    """
-    Apply an approved categorization by updating the QBO transaction.
-    Returns {success, qbo_response, error}.
-    """
-    if proposal.status != "approved":
-        return {"success": False, "error": "Proposal not approved"}
-    if not proposal.suggested_account_id:
-        return {"success": False, "error": "No suggested account ID — cannot update QBO"}
-
-    client = QBOClient(company)
-
-    try:
-        # Fetch current transaction
-        txn = client.get_transaction(db, proposal.qbo_txn_type, proposal.qbo_txn_id)
-        entity_key = proposal.qbo_txn_type  # "Purchase", "Deposit", etc.
-        txn_data = txn.get(entity_key, txn)
-
-        # Update the line's account reference
-        for line in txn_data.get("Line", []):
-            detail_key = f"{_txn_type_detail_key(proposal.qbo_txn_type)}"
-            if detail_key in line:
-                current_acct = line[detail_key].get("AccountRef", {}).get("value")
-                if current_acct == proposal.current_account_id:
-                    line[detail_key]["AccountRef"] = {
-                        "value": proposal.suggested_account_id,
-                        "name": proposal.suggested_account_name,
-                    }
-
-        # Post updated transaction
-        resp = client._post(db, f"/{proposal.qbo_txn_type.lower()}", txn_data)
-
-        proposal.status = "applied"
-        proposal.applied_at = _now()
-        proposal.qbo_update_response = resp
-
-        # Log the change
-        log = ChangeLog(
-            company_id=company.id,
-            realm_id=company.realm_id,
-            action_type="categorize_transaction",
-            entity_type=proposal.qbo_txn_type,
-            entity_id=proposal.qbo_txn_id,
-            description=(
-                f"Reclassified ${proposal.amount:,.2f} from "
-                f"'{proposal.current_account_name}' → '{proposal.suggested_account_name}'"
-            ),
-            original_value={"account": proposal.current_account_name},
-            new_value={"account": proposal.suggested_account_name},
-            reason=proposal.reason,
-            performed_by="AI Controller",
-            approved_by=proposal.approved_by,
-            human_approval=True,
-            status="success",
-        )
-        db.add(log)
-        db.commit()
-
-        return {"success": True, "qbo_response": resp}
-
-    except Exception as e:
-        db.rollback()
-        proposal.status = "pending"  # reset so it can be retried
-        db.commit()
-        return {"success": False, "error": str(e)}
-
-
 def _txn_type_detail_key(txn_type: str) -> str:
     """Return the QBO line detail key for a given transaction type."""
     return {
@@ -1756,11 +1428,8 @@ def apply_ar_match(
     client = QBOClient(company)
 
     try:
-        # Fetch the payment
         pmt_resp = client.get_transaction(db, "Payment", match.payment_id)
-        pmt = pmt_resp.get("Payment", pmt_resp)
-
-        # Add the invoice link
+        pmt = unwrap_entity(pmt_resp, "Payment")
         pmt.setdefault("Line", []).append({
             "Amount": match.match_amount,
             "LinkedTxn": [{
@@ -1768,36 +1437,55 @@ def apply_ar_match(
                 "TxnType": "Invoice",
             }],
         })
+        permit = issue_permit(
+            realm_id=company.realm_id,
+            record_realm_id=match.realm_id,
+            status=match.status,
+            action_id=str(match.id),
+            endpoint="/payment",
+        )
+        resp = QboTools(company).post_update(db, permit, "/payment", sparse_body(pmt))
 
-        resp = client._post(db, "/payment", pmt)
+        confirmed = False
+        try:
+            reread = unwrap_entity(client.get_transaction(db, "Payment", match.payment_id), "Payment")
+            for line in reread.get("Line") or []:
+                for link in line.get("LinkedTxn") or []:
+                    if str(link.get("TxnId")) == str(match.invoice_id):
+                        confirmed = True
+        except Exception:
+            confirmed = False
 
-        match.status = "applied"
+        match.status = "verified" if confirmed else "failed"
         match.applied_at = _now()
         match.qbo_response = resp
-
-        log = ChangeLog(
+        db.add(ChangeLog(
             company_id=company.id,
             realm_id=company.realm_id,
             action_type="apply_payment",
             entity_type="Payment",
             entity_id=match.payment_id,
             description=(
-                f"Applied ${match.match_amount:,.2f} payment from {match.customer_name} "
-                f"to Invoice #{match.invoice_number}"
+                f"Payment from {match.customer_name} to Invoice #{match.invoice_number}: "
+                + ("verified" if confirmed else "not confirmed on re-read")
             ),
-            reason="AI-proposed AR match, approved by controller",
+            reason="Approved AR match",
             performed_by="AI Controller",
             approved_by=match.approved_by,
             human_approval=True,
-            status="success",
-        )
-        db.add(log)
+            api_response=resp,
+            verification_status="verified" if confirmed else "mismatch",
+            status="success" if confirmed else "error",
+        ))
         db.commit()
-
+        if not confirmed:
+            return {"success": False, "error": "Payment was posted but the invoice link was not confirmed.", "qbo_response": resp}
         return {"success": True, "qbo_response": resp}
 
-    except Exception as e:
+    except WriteRefused as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:
         db.rollback()
-        match.status = "pending"
+        match.status = "approved"
         db.commit()
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(exc)}
