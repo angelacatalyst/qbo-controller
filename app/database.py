@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer, String, Text, create_engine, event
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
+from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
 import json
 
@@ -700,6 +701,10 @@ def _build_engine():
     # 1. Strip channel_binding=require — Neon's PgBouncer pooler does not
     #    support SCRAM-SHA-256-PLUS channel binding and the negotiation hangs.
     parsed = urlparse(url)
+    # SQLAlchemy 2.1 treats a bare postgresql:// URL as the psycopg v3 driver.
+    # This app installs psycopg2-binary, so name that driver explicitly.
+    if parsed.scheme in ("postgres", "postgresql"):
+        parsed = parsed._replace(scheme="postgresql+psycopg2")
     params = parse_qs(parsed.query, keep_blank_values=True)
     params.pop("channel_binding", None)
     new_query = urlencode({k: v[0] for k, v in params.items()})
@@ -707,7 +712,6 @@ def _build_engine():
 
     # 2. Use NullPool so connections are never held open between requests
     #    (required for serverless / connection-pooled Neon endpoints).
-    from sqlalchemy.pool import NullPool
 
     return create_engine(
         clean_url,
