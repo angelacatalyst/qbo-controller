@@ -10,3 +10,6 @@ python-multipart>=0.0.6
 aiofiles>=23.2.0
 itsdangerous>=2.1.0
 psycopg2-binary>=2.9.0
+
+# Password hashing (Milestone 1A)
+passlib[bcrypt]==1.7.4
