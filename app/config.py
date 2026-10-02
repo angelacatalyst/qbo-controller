@@ -39,6 +39,7 @@ class Settings:
     APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+    IS_PRODUCTION: bool = os.getenv("IS_PRODUCTION", "false").lower() == "true"
 
     # Token expiry buffer (seconds before actual expiry to refresh)
     TOKEN_REFRESH_BUFFER: int = 300

@@ -677,6 +677,86 @@ class CompanyRule(Base):
 
 # ── Database Setup ────────────────────────────────────────────
 
+
+# ══════════════════════════════════════════════════════════════
+# Milestone 1A — Authentication & Authorization models
+# ══════════════════════════════════════════════════════════════
+
+class User(Base):
+    """Application user with role-based access control."""
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=True)
+    role = Column(String(30), nullable=False, default="controller")
+    # roles: admin | controller | viewer
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+    company_accesses = relationship("CompanyAccess", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserSession(Base):
+    """
+    Server-side session record. Raw token is in the cookie; only the
+    SHA-256 hash is stored here so a DB leak never exposes live sessions.
+    """
+    __tablename__ = "user_sessions"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    ip_address = Column(String(64), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=_now)
+    last_seen = Column(DateTime, default=_now)
+
+    user = relationship("User", back_populates="sessions")
+
+
+class CompanyAccess(Base):
+    """
+    Maps a user to a QBO realm they are authorized to access.
+    NEVER grant access based solely on realm_id from client input —
+    always check this table.
+    """
+    __tablename__ = "company_accesses"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    company_id = Column(String(36), ForeignKey("companies.id"), nullable=False)
+    realm_id = Column(String(100), nullable=False, index=True)
+    role = Column(String(30), nullable=False, default="controller")
+    granted_by = Column(String(36), nullable=True)
+    granted_at = Column(DateTime, default=_now)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=_now)
+
+    user = relationship("User", back_populates="company_accesses")
+    company = relationship("Company")
+
+
+class OAuthState(Base):
+    """
+    Short-lived CSRF state token for QBO OAuth flow.
+    State is validated server-side (never trusted from client alone).
+    """
+    __tablename__ = "oauth_states"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    state = Column(String(64), nullable=False, unique=True, index=True)
+    payload = Column(JSONType, nullable=False, default=dict)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+
 def _build_engine():
     """Build a SQLAlchemy engine appropriate for the configured database."""
     url = settings.DATABASE_URL

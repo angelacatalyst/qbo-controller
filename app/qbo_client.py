@@ -5,6 +5,7 @@ Handles OAuth 2.0, token refresh, and all QBO API calls.
 Every call is scoped to a specific realm_id — never cross-company.
 """
 import secrets
+import threading
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -17,6 +18,23 @@ from app.bookkeeper.write_guard import WritePermit, WriteRefused, normalize_endp
 from app.config import settings
 from app.database import Company, SyncHistory, _now
 from app.security import decrypt_token, encrypt_token
+
+
+# ─── Per-realm refresh locks ─────────────────────────────────
+
+_realm_locks: dict[str, threading.Lock] = {}
+_realm_locks_mutex = threading.Lock()
+
+
+def _get_realm_lock(realm_id: str) -> threading.Lock:
+    """
+    Return a per-realm threading.Lock (singleton per realm_id).
+    Prevents concurrent token-refresh races for the same company.
+    """
+    with _realm_locks_mutex:
+        if realm_id not in _realm_locks:
+            _realm_locks[realm_id] = threading.Lock()
+        return _realm_locks[realm_id]
 
 
 # ─── OAuth Helpers ────────────────────────────────────────────

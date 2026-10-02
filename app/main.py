@@ -21,7 +21,7 @@ from app.database import (
     AccountingIssue, ChangeLog, Client, Company, CompanyProfile,
     MonthEndClose, ProposedJournalEntry, SyncHistory,
     ProposedCategorization, ProposedARMatch, RestaurantSalesData,
-    ExternalCredentials, WorkItem,
+    ExternalCredentials, WorkItem, OAuthState, User,
     _now, get_db, init_db
 )
 from app.security import decrypt_token, encrypt_token
@@ -50,6 +50,8 @@ from app.restaurant import (
 )
 
 import os
+from app.auth.router import router as auth_router
+from app.auth.dependencies import require_admin, check_realm_access
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -60,12 +62,43 @@ app = FastAPI(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ─── Auth Router ─────────────────────────────────────────────
+app.include_router(auth_router)
+
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 templates.env.cache = None  # Disable LRU cache to avoid unhashable type errors
 
-# In-memory OAuth state store (use Redis in production)
-_oauth_states: dict = {}
+# ─── OAuth State Helpers (DB-backed, survives restarts) ───────
+def _save_oauth_state(db: Session, state: str, payload: dict) -> None:
+    from datetime import timezone
+    obj = OAuthState(
+        state=state,
+        payload=payload,
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+    )
+    db.add(obj)
+    db.commit()
+    # Expire old entries opportunistically (fire-and-forget)
+    try:
+        db.query(OAuthState).filter(OAuthState.expires_at < datetime.utcnow()).delete()
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _pop_oauth_state(db: Session, state: str) -> dict | None:
+    row = (
+        db.query(OAuthState)
+        .filter(OAuthState.state == state, OAuthState.expires_at > datetime.utcnow())
+        .first()
+    )
+    if row is None:
+        return None
+    payload = dict(row.payload)
+    db.delete(row)
+    db.commit()
+    return payload
 # Pending connections awaiting user confirmation {realm_id: {client_id, qbo_company_name, ...}}
 _pending_connections: dict = {}
 
@@ -457,13 +490,15 @@ def qbo_connect_form(request: Request):
 def qbo_initiate_oauth(
     request: Request,
     client_id: str = Form(default=""),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     """Initiate QBO OAuth. Company name is NOT supplied by user — comes from QBO after auth."""
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = {
+    _save_oauth_state(db, state, {
         "client_id": client_id.strip() or None,
-        "created_at": datetime.utcnow(),
-    }
+        "created_at": datetime.utcnow().isoformat(),
+    })
     auth_url = build_auth_url(state)
     return RedirectResponse(url=auth_url, status_code=302)
 
@@ -480,10 +515,9 @@ def qbo_oauth_callback(
     if error:
         return RedirectResponse(url=f"/?error={error}", status_code=302)
 
-    if not state or state not in _oauth_states:
+    state_data = _pop_oauth_state(db, state) if state else None
+    if state_data is None:
         raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF attack")
-
-    state_data = _oauth_states.pop(state)
     client_id_from_state = state_data.get("client_id")
 
     if not code or not realmId:
@@ -588,6 +622,7 @@ def qbo_confirm_connection(
     request: Request,
     realm_id: str = Form(...),
     client_id: str = Form(default=""),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Finalize QBO ↔ Client association after confirmation."""
@@ -623,7 +658,7 @@ def qbo_confirm_connection(
 
 
 @app.post("/clients/{client_id}/set-active/{realm_id}")
-def set_active_realm(client_id: str, realm_id: str, db: Session = Depends(get_db)):
+def set_active_realm(client_id: str, realm_id: str, current_user: User = Depends(check_realm_access), db: Session = Depends(get_db)):
     """Set which QBO company is the active workspace for a client."""
     client = db.query(Client).filter_by(id=client_id).first()
     if not client:
@@ -693,21 +728,21 @@ def assign_client_to_company(
 
 
 @app.get("/qbo/reconnect/{realm_id}")
-def qbo_reconnect(realm_id: str, db: Session = Depends(get_db)):
+def qbo_reconnect(realm_id: str, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Re-initiate OAuth for an expired/disconnected company. Preserves client_id."""
     company = get_company_or_404(db, realm_id)
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = {
+    _save_oauth_state(db, state, {
         "client_id": company.client_id,
         "realm_id": realm_id,  # hint: this is a reconnect, not new
-        "created_at": datetime.utcnow(),
-    }
+        "created_at": datetime.utcnow().isoformat(),
+    })
     auth_url = build_auth_url(state)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
 @app.post("/qbo/disconnect/{realm_id}")
-def qbo_disconnect(realm_id: str, db: Session = Depends(get_db)):
+def qbo_disconnect(realm_id: str, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     company = get_company_or_404(db, realm_id)
     refresh_tok = decrypt_token(company.refresh_token_enc or "")
     if refresh_tok:
@@ -730,7 +765,7 @@ def qbo_disconnect(realm_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/company/{realm_id}/set-active")
-def set_company_active(realm_id: str, db: Session = Depends(get_db)):
+def set_company_active(realm_id: str, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Set this company as the active workspace. Clears is_active on all others."""
     company = get_company_or_404(db, realm_id)
     # Clear all active flags
@@ -742,7 +777,7 @@ def set_company_active(realm_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/company/{realm_id}/remove")
-def remove_company(realm_id: str, db: Session = Depends(get_db)):
+def remove_company(realm_id: str, current_user: User = Depends(check_realm_access), db: Session = Depends(get_db)):
     """Soft-remove a QBO company from the workspace. Does NOT delete any accounting data."""
     company = get_company_or_404(db, realm_id)
     company.connection_status = "removed"
@@ -765,6 +800,7 @@ def remove_company(realm_id: str, db: Session = Depends(get_db)):
 def trigger_sync(
     realm_id: str,
     sync_type: str = Form(default="full"),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     company = get_company_or_404(db, realm_id)
@@ -945,6 +981,7 @@ def propose_journal_entry(
     description: str = Form(...),
     reason: str = Form(...),
     materiality: str = Form(default="low"),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     company = get_company_or_404(db, realm_id)
@@ -973,6 +1010,7 @@ def approve_journal_entry(
     realm_id: str,
     je_id: str,
     approved_by: str = Form(default="Controller"),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     je = db.query(ProposedJournalEntry).filter_by(
@@ -1004,6 +1042,7 @@ def reject_journal_entry(
     realm_id: str,
     je_id: str,
     reason: str = Form(default=""),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     je = db.query(ProposedJournalEntry).filter_by(
@@ -1022,6 +1061,7 @@ def reject_journal_entry(
 def execute_journal_entry(
     realm_id: str,
     je_id: str,
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     """Execute an approved journal entry in QBO."""
@@ -1151,6 +1191,7 @@ def update_close_step_api(
     step_num: int = Form(...),
     step_status: str = Form(...),
     notes: str = Form(default=""),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     get_company_or_404(db, realm_id)
@@ -1497,6 +1538,7 @@ def bookkeeping_dashboard(realm_id: str, request: Request, db: Session = Depends
 def run_categorize(
     realm_id: str,
     lookback_days: int = Form(90),
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     company = get_company_or_404(db, realm_id)
@@ -1657,7 +1699,7 @@ def reject_categorization(
 
 
 @app.post("/company/{realm_id}/categorization/{cat_id}/apply")
-def apply_categorization_route(realm_id: str, cat_id: str, db: Session = Depends(get_db)):
+def apply_categorization_route(realm_id: str, cat_id: str, current_user: User = Depends(check_realm_access), db: Session = Depends(get_db)):
     """Apply an approved WorkItem to QBO. Requires explicit prior approval."""
     company = get_company_or_404(db, realm_id)
     wi = db.query(WorkItem).filter(
@@ -1680,7 +1722,7 @@ def apply_categorization_route(realm_id: str, cat_id: str, db: Session = Depends
 
 
 @app.post("/company/{realm_id}/work-items/{item_id}/execute")
-def execute_work_item_route(realm_id: str, item_id: str, db: Session = Depends(get_db)):
+def execute_work_item_route(realm_id: str, item_id: str, current_user: User = Depends(check_realm_access), db: Session = Depends(get_db)):
     """Execute any approved WorkItem by ID (generic endpoint for future work types)."""
     company = get_company_or_404(db, realm_id)
     wi = db.query(WorkItem).filter(
@@ -1781,7 +1823,7 @@ def reject_ar_match(
 
 
 @app.post("/company/{realm_id}/ar-match/{match_id}/apply")
-def apply_ar_match_route(realm_id: str, match_id: int, db: Session = Depends(get_db)):
+def apply_ar_match_route(realm_id: str, match_id: int, current_user: User = Depends(check_realm_access), db: Session = Depends(get_db)):
     company = get_company_or_404(db, realm_id)
     match = db.query(ProposedARMatch).filter_by(id=match_id, realm_id=realm_id).first()
     if not match:
@@ -1986,6 +2028,7 @@ async def import_platform_csv(
 def generate_restaurant_je(
     realm_id: str,
     sales_date: str,
+    current_user: User = Depends(check_realm_access),
     db: Session = Depends(get_db),
 ):
     """Generate a proposed journal entry for the specified sales date."""

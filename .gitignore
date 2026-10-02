@@ -1,0 +1,68 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.installed.cfg
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.whl
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ── Local SQLite databases (NEVER commit) ─────────────────────
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ── Patch files (NEVER commit) ────────────────────────────────
+*.patch
+*.diff
+
+# ── pytest / coverage ─────────────────────────────────────────
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ── mypy / pyright ────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+pyrightconfig.json
+
+# ── Alembic local state ───────────────────────────────────────
+# alembic.ini is intentionally excluded IF it contains secrets
+# Include it only after verifying it holds no credentials
+# alembic.ini    ← tracked; remove this comment to ignore
+
+# ── IDE / OS ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+logs/
