@@ -117,6 +117,46 @@ def _token_status(company: Company) -> str:
     return "connected"
 
 
+
+def _bootstrap_initial_admin() -> None:
+    """
+    Create the first admin user from environment variables — idempotent.
+
+    Conditions that must ALL be true before any user is created:
+      1. INITIAL_ADMIN_EMAIL is set and non-empty
+      2. INITIAL_ADMIN_PASSWORD is set and non-empty
+      3. The users table currently has zero rows
+
+    If any condition fails the function returns silently.  It never logs
+    the password or any other secret, and it never overwrites an existing user.
+    """
+    import os as _os
+    from app.database import SessionLocal as _SessionLocal, User as _User
+    from app.auth.service import create_initial_admin as _create_initial_admin
+
+    _email = _os.environ.get("INITIAL_ADMIN_EMAIL", "").strip()
+    _password = _os.environ.get("INITIAL_ADMIN_PASSWORD", "")
+    _full_name = _os.environ.get("INITIAL_ADMIN_FULL_NAME", "Initial Admin").strip() or "Initial Admin"
+
+    if not _email or not _password:
+        print("ℹ Bootstrap: INITIAL_ADMIN_EMAIL/PASSWORD not set — skipping")
+        return
+
+    _db = _SessionLocal()
+    try:
+        _user_count = _db.query(_User).count()
+        if _user_count > 0:
+            print(f"ℹ Bootstrap: {_user_count} user(s) already exist — skipping")
+            return
+        _create_initial_admin(_db, email=_email, password=_password, full_name=_full_name)
+        print(f"✓ Bootstrap: initial admin created for {_email}")
+    except Exception as _exc:
+        # Non-fatal — log without revealing any credentials
+        print(f"⚠ Bootstrap: failed to create initial admin — {type(_exc).__name__}: {_exc}")
+    finally:
+        _db.close()
+
+
 @app.on_event("startup")
 def startup():
     try:
@@ -144,6 +184,13 @@ def startup():
                     print(f"⚠ Migration skip: {_e}")
     except Exception as _e:
         print(f"⚠ Migration connection error: {_e}")
+
+    # ── First-time admin bootstrap (production only) ───────────
+    # Reads INITIAL_ADMIN_EMAIL + INITIAL_ADMIN_PASSWORD from the environment.
+    # Runs ONLY when the users table is empty — never overwrites existing users.
+    # Remove or leave the env vars set after first deploy; they are ignored once
+    # a user exists.  The password is NEVER logged.
+    _bootstrap_initial_admin()
 
 
 # ─── Jinja2 Filters ───────────────────────────────────────────

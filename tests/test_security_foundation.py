@@ -272,3 +272,173 @@ class TestRefreshLock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ════════════════════════════════════════════════════════════════
+# 9 · Startup bootstrap — _bootstrap_initial_admin()
+# ════════════════════════════════════════════════════════════════
+class TestBootstrapInitialAdmin(unittest.TestCase):
+    """
+    Tests for the _bootstrap_initial_admin() startup helper.
+
+    Each test creates an isolated in-memory SQLite database so the
+    users table state is controlled precisely.  app.database.SessionLocal
+    is patched to return that database session, avoiding any interaction
+    with the real database.
+    """
+
+    def _make_db(self):
+        """Return an isolated in-memory SQLite session with all app tables."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from app.database import Base
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        return Session()
+
+    def test_empty_table_valid_vars_creates_one_admin(self):
+        """Empty users table + valid env vars → exactly one admin is created."""
+        from app.main import _bootstrap_initial_admin
+        from app.database import User
+
+        db = self._make_db()
+        env = {
+            "INITIAL_ADMIN_EMAIL": "admin@example.com",
+            "INITIAL_ADMIN_PASSWORD": "BootstrapPass123!",
+            "INITIAL_ADMIN_FULL_NAME": "Test Admin",
+        }
+        with patch("app.database.SessionLocal", return_value=db):
+            with patch.dict(os.environ, env, clear=False):
+                _bootstrap_initial_admin()
+
+        count = db.query(User).count()
+        self.assertEqual(count, 1, "Expected exactly one user after bootstrap")
+        user = db.query(User).first()
+        self.assertEqual(user.email, "admin@example.com")
+        self.assertEqual(user.role, "admin")
+        db.close()
+
+    def test_existing_user_env_vars_present_no_new_user_created(self):
+        """Existing user + env vars present → bootstrap is a no-op; no second user created."""
+        from app.main import _bootstrap_initial_admin
+        from app.auth.service import create_initial_admin
+        from app.database import User
+
+        db = self._make_db()
+        # Pre-create a user so the table is non-empty
+        create_initial_admin(
+            db, email="existing@example.com",
+            password="ExistPass1!", full_name="Existing Admin"
+        )
+
+        env = {
+            "INITIAL_ADMIN_EMAIL": "second@example.com",
+            "INITIAL_ADMIN_PASSWORD": "SecondPass123!",
+        }
+        with patch("app.database.SessionLocal", return_value=db):
+            with patch.dict(os.environ, env, clear=False):
+                _bootstrap_initial_admin()
+
+        count = db.query(User).count()
+        self.assertEqual(count, 1, "Bootstrap must not create a second user when one exists")
+        db.close()
+
+    def test_empty_table_missing_env_vars_no_user_created(self):
+        """Empty users table + missing INITIAL_ADMIN_* vars → no user created."""
+        from app.main import _bootstrap_initial_admin
+        from app.database import User
+
+        db = self._make_db()
+        # Clear the two mandatory env vars if present
+        stripped = {
+            k: v for k, v in os.environ.items()
+            if k not in ("INITIAL_ADMIN_EMAIL", "INITIAL_ADMIN_PASSWORD")
+        }
+        with patch("app.database.SessionLocal", return_value=db):
+            with patch.dict(os.environ, stripped, clear=True):
+                _bootstrap_initial_admin()
+
+        count = db.query(User).count()
+        self.assertEqual(count, 0, "Bootstrap must not create any user without env vars")
+        db.close()
+
+    def test_password_stored_hashed_never_plaintext(self):
+        """Bootstrap stores the bcrypt hash in DB; plaintext password is never written."""
+        from app.main import _bootstrap_initial_admin
+        from app.database import User
+        from app.security import verify_password
+
+        db = self._make_db()
+        plaintext = "SuperSecret999!"
+        env = {
+            "INITIAL_ADMIN_EMAIL": "hashed@example.com",
+            "INITIAL_ADMIN_PASSWORD": plaintext,
+        }
+        with patch("app.database.SessionLocal", return_value=db):
+            with patch.dict(os.environ, env, clear=False):
+                _bootstrap_initial_admin()
+
+        user = db.query(User).first()
+        self.assertIsNotNone(user, "A user must have been created")
+        # Plaintext must NOT be stored verbatim
+        self.assertNotEqual(
+            user.hashed_password, plaintext,
+            "Plaintext password must not be stored in hashed_password"
+        )
+        # bcrypt verify must pass
+        self.assertTrue(
+            verify_password(plaintext, user.hashed_password),
+            "verify_password() must return True for the original password"
+        )
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════
+# 10 · Production SQLite guard — _build_engine()
+# ════════════════════════════════════════════════════════════════
+class TestProductionSQLiteGuard(unittest.TestCase):
+    """
+    Tests for the IS_PRODUCTION + SQLite fail-fast guard in _build_engine().
+
+    Settings attributes are patched directly on the module-level `settings`
+    object so the guard reads the patched values at call time.
+    The existing module-level `engine` is already built; these tests call
+    _build_engine() directly to exercise the guard in isolation.
+    """
+
+    def test_production_sqlite_raises_runtime_error(self):
+        """IS_PRODUCTION=true + SQLite URL → RuntimeError before any connection."""
+        from app.database import _build_engine
+        from app.config import settings
+
+        with patch.object(settings, "IS_PRODUCTION", True), \
+             patch.object(settings, "DATABASE_URL", "sqlite:///./qbo_controller.db"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _build_engine()
+
+        msg = str(ctx.exception)
+        self.assertIn("SQLite", msg)
+        self.assertIn("IS_PRODUCTION", msg)
+        self.assertIn("PostgreSQL", msg)
+
+    def test_non_production_sqlite_is_allowed(self):
+        """IS_PRODUCTION=false + SQLite URL → engine is built without error."""
+        from app.database import _build_engine
+        from app.config import settings
+
+        with patch.object(settings, "IS_PRODUCTION", False), \
+             patch.object(settings, "DATABASE_URL", "sqlite:///:memory:"), \
+             patch.object(settings, "DEBUG", False):
+            try:
+                eng = _build_engine()
+                eng.dispose()
+            except RuntimeError as exc:
+                self.fail(
+                    f"_build_engine() raised RuntimeError for non-production SQLite: {exc}"
+                )

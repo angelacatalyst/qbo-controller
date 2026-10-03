@@ -761,6 +761,15 @@ def _build_engine():
     """Build a SQLAlchemy engine appropriate for the configured database."""
     url = settings.DATABASE_URL
 
+    # ── Production guard ─────────────────────────────────────────────────────
+    # SQLite stores data in a local file that is destroyed on every Render
+    # deploy.  Refuse to start in production so data loss is impossible.
+    if settings.IS_PRODUCTION and "sqlite" in url.lower():
+        raise RuntimeError(
+            "SQLite is not allowed in production (IS_PRODUCTION=true). "
+            "DATABASE_URL must point to a persistent PostgreSQL database."
+        )
+
     if "sqlite" in url:
         eng = create_engine(
             url,
