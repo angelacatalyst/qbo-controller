@@ -55,6 +55,43 @@ class TestPasswordHashing(unittest.TestCase):
         self.assertTrue(self.verify_password("SamePass", h2))
 
 
+    def test_password_over_72_bytes_hashes_and_verifies(self):
+        """Passwords longer than bcrypt's 72-byte limit hash and verify correctly."""
+        # 80 ASCII chars = 80 bytes — safely over the 72-byte bcrypt limit
+        long_pw = "Aa1!" * 20   # 80 chars
+        hashed = self.hash_password(long_pw)
+        self.assertIsNotNone(hashed)
+        self.assertTrue(
+            self.verify_password(long_pw, hashed),
+            "verify_password must return True for a password >72 bytes"
+        )
+
+    def test_passwords_differing_only_after_byte_72_produce_different_hashes(self):
+        """Two passwords that differ only after byte 72 must NOT produce the same hash.
+
+        With raw bcrypt (no pre-hash), bytes beyond position 72 are silently
+        discarded, so 'AAAA...A' (72 A's + 'X') and 'AAAA...A' (72 A's + 'Y')
+        would hash identically.  SHA-256 pre-hashing eliminates this defect.
+        """
+        base = "A" * 72
+        pw_x = base + "X"   # differs at byte 73
+        pw_y = base + "Y"   # differs at byte 73
+
+        hashed_x = self.hash_password(pw_x)
+        hashed_y = self.hash_password(pw_y)
+
+        # The two hashes must be different (bcrypt salts are random, but even
+        # without that, we verify cross-verification fails)
+        self.assertFalse(
+            self.verify_password(pw_x, hashed_y),
+            "pw_x must NOT verify against pw_y's hash — no truncation at 72 bytes"
+        )
+        self.assertFalse(
+            self.verify_password(pw_y, hashed_x),
+            "pw_y must NOT verify against pw_x's hash — no truncation at 72 bytes"
+        )
+
+
 class TestSessionToken(unittest.TestCase):
     def setUp(self):
         from app.security import generate_session_token, hash_session_token

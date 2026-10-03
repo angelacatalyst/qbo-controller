@@ -12,4 +12,8 @@ itsdangerous>=2.1.0
 psycopg2-binary>=2.9.0
 
 # Password hashing (Milestone 1A)
-passlib[bcrypt]==1.7.4
+# Direct bcrypt 4.x — no passlib dependency.
+# bcrypt 4.0 enforces the 72-byte input limit with a hard ValueError (older
+# versions silently truncated — a security defect).  We pre-hash with SHA-256
+# so bcrypt always receives exactly 32 bytes.  Do NOT downgrade below 4.0.0.
+bcrypt>=4.0.0,<5.0.0
